@@ -314,7 +314,11 @@ BLOCK_BYTES = 57 * 9198            # 524,286
 # Largest WebSocket message. One base64 line per message was ~190,000
 # messages for a 10.7MB binary, each a coroutine on the event loop.
 MSG_BYTES = 32 * 1024
-# New sessions one transfer may open after its socket dropped.
+# New sessions a transfer may open in a row without getting further. Counted
+# per stretch without progress, as push_file.py counts tries per block: the
+# plane drops every so often under load, so a long file meets more drops
+# than a short one, and a session that confirms new blocks starts the count
+# again.
 RESUME_TRIES = 3
 # How long the device has to confirm a block, counted from when the block
 # after it finished sending (or from the last block, for the last one).
@@ -372,7 +376,9 @@ class _BlockPush:
         self.acked = 0                   # blocks confirmed, always a prefix
         self.acked_md5 = hashlib.md5()   # of data[:acked * BLOCK_BYTES]
         self.out = ""                    # device output not yet consumed
-        self.resumes = 0
+        self.resumes = 0                 # sessions reopened, in all
+        self.stuck = 0                   # of those, in a row without progress
+        self.best = 0                    # most blocks confirmed at any drop
 
     def _block(self, i: int) -> bytes:
         return self.data[i * BLOCK_BYTES:(i + 1) * BLOCK_BYTES]
@@ -478,16 +484,24 @@ class _BlockPush:
                 return "write", str(e)
             except Exception as e:
                 why = str(e) or type(e).__name__
-            if self.resumes >= RESUME_TRIES:
+            # Against the best so far, not the last session: a prefix the trim
+            # could not vouch for starts again at 0, and climbing back is not
+            # progress. So it ends at most RESUME_TRIES sessions after the
+            # furthest block yet was confirmed.
+            if self.acked > self.best:
+                self.best, self.stuck = self.acked, 0
+            if self.stuck >= RESUME_TRIES:
                 return "send", (f"the session dropped {self.resumes + 1} times, "
-                                f"last: {why}")
+                                f"{self.stuck} new sessions in a row got no "
+                                f"further, last: {why}")
             if em_state.devices.get(device_id) is not self.live:
                 return "send", f"the device disconnected ({why})"
             self.resumes += 1
+            self.stuck += 1
             log.warning(f"[api] {device_id}: shell session dropped sending "
                         f"{self.landing} ({why}) with {self.acked} of "
                         f"{self.count} blocks confirmed; opening a new one "
-                        f"({self.resumes}/{RESUME_TRIES})")
+                        f"({self.stuck}/{RESUME_TRIES} without progress)")
 
 
 async def stream_file(live, data: bytes, dest: str,

@@ -299,6 +299,27 @@ def test_a_prefix_the_device_cannot_confirm_starts_the_file_again(tmp_path, smal
         "an unconfirmed prefix must be sent again in full")
 
 
+def test_a_link_that_keeps_dropping_still_finishes_while_it_gets_further(tmp_path, small_blocks):
+    """
+    The plane drops every so often under load (push_file.py met it about every
+    50s), so a long file meets more drops than a short one. Each session here
+    confirms more blocks than the last before it dies, more times than
+    RESUME_TRIES: the budget counts drops that get nowhere.
+    """
+    data = _data(12 * small_blocks)
+    per_block = len(base64.encodebytes(data[:small_blocks]))
+    dest = tmp_path / "server_b"
+    dest.write_bytes(b"previous binary")
+    drops = em_shell.RESUME_TRIES + 3
+    dev = Device(plan=[{"drop_at": 2 * per_block + per_block // 2}] * drops)
+
+    res = _push(dev, data, dest, mode="755")
+
+    assert res, str(res)
+    assert dest.read_bytes() == data
+    assert len(dev.sessions) > em_shell.RESUME_TRIES + 1
+
+
 def test_too_many_drops_fail_and_leave_the_destination_alone(tmp_path, small_blocks):
     data = _data(6 * small_blocks)
     dest = tmp_path / "server_b"
