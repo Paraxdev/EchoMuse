@@ -232,6 +232,35 @@ function _emitDeviceLog(deviceId, entry) {
   _logSubs.forEach(fn => { try { fn(deviceId, entry); } catch (e) { console.error(e); } });
 }
 
+// Developer tools: the root Console tab, Local Build and Local payload,
+// Re-apply debloat, and the diagnostic wake word mode. Off unless switched
+// on in Settings > System, because an admin who is not developing EchoMuse
+// has no reason to reach for them and several can leave an Echo needing a
+// USB cable. Per browser, in localStorage; where storage is refused the
+// choice still holds for the session.
+const DEV_TOOLS_KEY = 'em-devtools';
+let _devTools = (() => {
+  try { return localStorage.getItem(DEV_TOOLS_KEY) === '1'; } catch (e) { return false; }
+})();
+const _devToolsSubs = new Set();
+function setDevTools(on) {
+  _devTools = !!on;
+  try {
+    if (_devTools) localStorage.setItem(DEV_TOOLS_KEY, '1');
+    else localStorage.removeItem(DEV_TOOLS_KEY);
+  } catch (e) { /* private mode */ }
+  _devToolsSubs.forEach(fn => fn(_devTools));
+}
+function useDevTools() {
+  const [on, setOn] = useState(_devTools);
+  useEffect(() => {
+    _devToolsSubs.add(setOn);
+    setOn(_devTools);
+    return () => { _devToolsSubs.delete(setOn); };
+  }, []);
+  return on;
+}
+
 function deviceState(d) {
   if (!d.approved)  return { key: 'pending',   label: 'Pending',   color: 'var(--accent-hi)', dot: '#8ab0d0', lcd: 'var(--accent-lit)' };
   if (!d.connected) return { key: 'offline',   label: 'Offline',   color: 'var(--warn)', dot: '#d4703a', lcd: 'var(--lcd-offline)' };
@@ -1852,9 +1881,17 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
   const state = deviceState(device);
   const needsUpdate = !!device.firmware_update;
 
+  const devTools = useDevTools();
   const TABS = device.approved
-    ? (isAdmin ? ['home', 'status', 'activity', 'config', 'console', 'updates', 'logs'] : ['home', 'status', 'activity', 'config', 'logs'])
+    ? (isAdmin
+        ? ['home', 'status', 'activity', 'config', ...(devTools ? ['console'] : []), 'updates', 'logs']
+        : ['home', 'status', 'activity', 'config', 'logs'])
     : ['approve'];
+  // A tab that stops existing while it is open (developer tools switched off
+  // in another window) falls back to the first rather than rendering blank.
+  useEffect(() => {
+    if (!TABS.includes(tab)) setTab(TABS[0]);
+  }, [TABS.join(',')]);
 
   useEffect(() => {
     if (tab === 'home') {
@@ -2972,6 +3009,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                     </span>
                   </div>
                   {/* The developer path, as Local Build is for firmware. */}
+                  {devTools && (
                   <div style={{ display:'flex', gap:'var(--space-5)', alignItems:'center', flexWrap:'wrap', marginTop:'var(--space-7)', borderTop:'1px solid var(--hairline)', paddingTop:'var(--space-5)' }}>
                     <input ref={emosFileRef} type="file" accept=".zip" style={{ display:'none' }}
                       onChange={e => setEmosFile(e.target.files[0] || null)}/>
@@ -2994,6 +3032,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                       </span>
                     )}
                   </div>
+                  )}
                 </Panel>
                 );
               })()}
@@ -3002,6 +3041,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                   button, which now lives beside the version state above.
                   Local Build remains as the developer path — correctly
                   secondary, and no longer competing for the top half. */}
+              {devTools && (
               <div className="em-grid2" style={{ display:'grid', gridTemplateColumns:'1fr', gap:'var(--space-8)' }}>
                 <Panel label="Local Build">
                   <div style={{ fontFamily:"var(--font-mono)", fontSize:'var(--fs-sm)', color:'var(--muted)', lineHeight:1.6, marginBottom:'var(--space-7)' }}>
@@ -3027,13 +3067,15 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                   </div>
                 </Panel>
               </div>
+              )}
 
               {/* Maintenance — device-side payloads that are not the firmware
                   binary. These used to sit on the Status tab beside Secure
                   link, which was the wrong home: Status describes what a device
                   IS, and re-applying a payload is something you DO. It belongs
-                  next to deploy and rollback. */}
-              {isAdmin && (
+                  next to deploy and rollback, behind developer tools since the
+                  OTA reapplies it by itself. */}
+              {isAdmin && devTools && (
                 <Panel label="Maintenance">
                   <div style={{ fontFamily:"var(--font-mono)", fontSize:'var(--fs-sm)', color:'var(--muted)', lineHeight:1.6, marginBottom:'var(--space-7)' }}>
                     Re-apply the debloat payloads: sync the boot script and hide any
@@ -10011,6 +10053,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
   // no per-section switches and every control is live.
   const scoped = Array.isArray(sections);
   const isLocal = id => !scoped || sections.includes(id);
+  const devTools = useDevTools();
 
   // Writes are gated by the OWNING SECTION rather than per control. Deriving
   // the section from the key means every existing and future control becomes
@@ -10410,7 +10453,8 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
               )}
               {/* Where the wake word is detected (docs/listening.md). Two
                   choices; "shadow" is a developer diagnostic, set through the
-                  API and shown here only on an Echo already in it, labelled as
+                  API and shown here only on an Echo already in it or with
+                  developer tools on, labelled as
                   the streaming mode it is. "On this Echo" needs oww_trigger —
                   shadow shipped first and there is firmware in the field that
                   scores and reports without being able to act on it. */}
@@ -10432,7 +10476,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                   // them reports itself degraded (button only) below.
                   { value: 'on',  label: 'On this Echo',      disabled: !triggerCapable },
                   { value: 'off', label: 'On the controller' },
-                  ...(onDeviceMode(config) === 'shadow'
+                  ...(onDeviceMode(config) === 'shadow' || (devTools && shadowCapable)
                     ? [{ value: 'shadow', label: 'Diagnostic (streams)' }] : []),
                 ]}
                 onChange={v => set('owwOnDevice', v)}/>
@@ -10992,6 +11036,7 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
                         emosFleet = true }) {
   const [tab, setTab]             = useState('fleet');
   const [config, setConfig]       = useState({ ...globalConfig });
+  const devTools                  = useDevTools();
   const [dirty, setDirty]         = useState(false);
   const [saving, setSaving]       = useState(false);
 
@@ -11289,6 +11334,17 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
                   {sysMsg.ok ? '✓ ' : ''}{sysMsg.text}
                 </div>
               )}
+
+              {/* Not system_config: it changes what this browser shows, takes
+                  effect at once, and needs no Save. */}
+              <div className="em-panel em-panel--stacked" style={{ marginTop: 'var(--space-9)' }}>
+                <div className="em-label" style={{ marginBottom:'var(--space-7)' }}>This browser</div>
+                <Toggle label="Show developer tools" sub="this browser only" value={devTools} onChange={setDevTools}/>
+                <div className="em-field__help" style={{ marginBottom: 0 }}>
+                  Adds an Echo&apos;s root Console tab, Local Build and Local payload on its Updates
+                  tab, Re-apply debloat, and the diagnostic wake word mode.
+                </div>
+              </div>
             </div>
           )}
 

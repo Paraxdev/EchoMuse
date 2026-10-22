@@ -129,6 +129,9 @@ await ctx.addInitScript(
     localStorage.setItem('em_token', t);
     localStorage.setItem('em_role', 'admin');
     localStorage.setItem('em_auth_via', 'password');
+    // Settings > System > Show developer tools, so the walk still reaches the
+    // Console tab and the developer panels on Updates.
+    localStorage.setItem('em-devtools', '1');
   },
   [token],
 );
