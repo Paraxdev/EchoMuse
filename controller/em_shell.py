@@ -29,6 +29,10 @@ log = logging.getLogger("echomuse.api")
 # seconds after a register it is often not up yet.
 CONNECT_RETRY_S = 10.0
 
+# How long a caller waits for another session on the same device to finish,
+# unless it asks for longer.
+LOCK_WAIT_S = 20.0
+
 sockets: dict = {}   # device_id → live ws for programmatic sessions
 locks:   dict = {}   # device_id → asyncio.Lock (one session at a time)
 # device_id → the asyncio Task that actually holds its lock.
@@ -46,11 +50,12 @@ locks:   dict = {}   # device_id → asyncio.Lock (one session at a time)
 owners:  dict = {}   # device_id → task holding its lock
 
 
-async def get_ws(live) -> object:
+async def get_ws(live, lock_wait: float | None = None) -> object:
     """
     Request a programmatic shell connection from the device.
 
-    Acquires a per-device lock so sessions are strictly sequential.
+    Acquires a per-device lock so sessions are strictly sequential, waiting
+    `lock_wait` seconds for it (LOCK_WAIT_S by default).
     handle_shell resolves the future with the ws, then waits for ws.close()
     before returning — so the connection stays alive while we use it.
     """
@@ -59,8 +64,9 @@ async def get_ws(live) -> object:
     if device_id not in locks:
         locks[device_id] = asyncio.Lock()
 
+    wait = LOCK_WAIT_S if lock_wait is None else lock_wait
     try:
-        await asyncio.wait_for(locks[device_id].acquire(), timeout=20.0)
+        await asyncio.wait_for(locks[device_id].acquire(), timeout=wait)
     except asyncio.TimeoutError:
         raise RuntimeError(f"Shell lock acquisition timed out for {device_id}")
     # Claimed immediately after a successful acquire and never before it:
@@ -184,19 +190,21 @@ def _text(msg) -> str:
     return msg.decode("utf-8", errors="replace") if isinstance(msg, bytes) else msg
 
 
-async def run(live, cmd: str, timeout: float = 30.0) -> str:
+async def run(live, cmd: str, timeout: float = 30.0,
+              lock_wait: float | None = None) -> str:
     """
     Run a shell command on the device and return its stdout as a string.
 
     Appends a sentinel marker to detect when output is complete. Forgiving:
     any failure returns "", and 5s without output returns whatever arrived.
     A caller that must tell "printed nothing" from "never answered" appends
-    OK_MARK, or uses run_strict.
+    OK_MARK, or uses run_strict. `lock_wait` is passed to get_ws.
     """
-    return await _run(live, cmd, timeout, strict=False)
+    return await _run(live, cmd, timeout, strict=False, lock_wait=lock_wait)
 
 
-async def run_strict(live, cmd: str, timeout: float = 30.0) -> str:
+async def run_strict(live, cmd: str, timeout: float = 30.0,
+                     silence_s: float | None = None) -> str:
     """
     run(), for a caller that acts on what is ABSENT from the output.
 
@@ -205,25 +213,35 @@ async def run_strict(live, cmd: str, timeout: float = 30.0) -> str:
     partial output after a quiet spell read, to the wake word reconcile, as
     an Echo with nothing installed, and the answer to that was an 11.7MB push
     over the link that had just failed (10-21/22, four times in one night).
+
+    With `silence_s`, that many seconds without a byte also raise. The session
+    holds the device's shell lock throughout, so a stalled link otherwise
+    keeps everyone else off the device for the whole of `timeout`.
     """
-    return await _run(live, cmd, timeout, strict=True)
+    return await _run(live, cmd, timeout, strict=True, silence_s=silence_s)
 
 
-async def _run(live, cmd: str, timeout: float, strict: bool) -> str:
+async def _run(live, cmd: str, timeout: float, strict: bool,
+               silence_s: float | None = None,
+               lock_wait: float | None = None) -> str:
     device_id = live.device_id
     buf = ""
     try:
-        ws = await get_ws(live)
+        ws = await get_ws(live, lock_wait)
         await ws.send(f"{cmd} ; echo '{_SENTINEL}'\n")
         deadline = time.monotonic() + timeout
         while (left := deadline - time.monotonic()) > 0:
+            # md5 over the 12MB runtime can be silent for longer than 5s.
+            quiet = min(left, silence_s or left) if strict else 5.0
             try:
-                # md5 over the 12MB runtime can be silent for longer than 5s.
-                msg = await asyncio.wait_for(ws.recv(), timeout=left if strict else 5.0)
+                msg = await asyncio.wait_for(ws.recv(), timeout=quiet)
             except asyncio.TimeoutError:
-                if strict:
-                    continue
-                break
+                if not strict:
+                    break
+                if quiet < left:
+                    raise ShellError(f"no output for {quiet:.0f}s "
+                                     f"({len(buf)} bytes before it)")
+                continue
             buf += _text(msg)
             # Searched in everything received, not per message: the device
             # sends output in whatever pieces its reads produce, and the

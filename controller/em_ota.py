@@ -45,11 +45,18 @@ in_progress: set[str] = set()
 # rest of a fleet update behind it.
 queue = asyncio.Lock()
 
-# Longest one device may hold the OTA queue. A real update is a ~10MB transfer,
-# a reboot and a 90s reconnect watch, so this is a deadlock cap rather than a
+# Longest one device may hold the OTA queue before its binary is in place. A
+# real update is a ~10MB transfer, so this is a deadlock cap rather than a
 # performance budget: it exists because serialising made one wedged device able
-# to block the whole fleet's updates until the controller restarted.
+# to block the whole fleet's updates until the controller restarted. The flip
+# and the reconnect watch after it are outside it and bound themselves.
 MAX_HOLD_S = 300.0
+
+# How long the slot detect waits for the device's shell lock. The asset
+# listing the Updates tab sends on opening holds it for up to its 120s budget,
+# plus 15s to open the session and the close, and a lock wait that ran out
+# read as "Could not determine active slot".
+DETECT_LOCK_WAIT_S = 150.0
 
 # Devices waiting on `queue`. Reported separately from
 # `update_in_progress` so the dashboard says "queued" rather than claiming
@@ -171,19 +178,27 @@ async def run_update(device_id: str, release: dict,
         # stalled one device; now it would hold the queue and NOTHING could be
         # updated until the controller restarted.
         #
-        # Generous on purpose — a real update is a ~10MB transfer plus a reboot
-        # and a 90s reconnect watch, so this is a deadlock cap, not a
-        # performance budget. A device that trips it has failed anyway.
-        await asyncio.wait_for(
-            _run_update_locked(device_id, release, binary_override),
-            timeout=MAX_HOLD_S,
-        )
-    except asyncio.TimeoutError:
-        await _update_failed(
-            device_id,
-            f"Update abandoned after {MAX_HOLD_S:.0f}s so the queue "
-            f"could continue — the device may still be mid-update",
-        )
+        # Generous on purpose: a deadlock cap, not a performance budget. It
+        # ends once the new binary is verified in the inactive slot. With
+        # resumable transfers a slow link can finish one late in the cap, and
+        # a cap that also covered the flip and the reconnect watch fired
+        # inside the watch: "Update abandoned" for an Echo already running the
+        # new firmware, and no confirmation sent.
+        try:
+            staged = await asyncio.wait_for(
+                _run_update_locked(device_id, release, binary_override),
+                timeout=MAX_HOLD_S,
+            )
+        except asyncio.TimeoutError:
+            await _update_failed(
+                device_id,
+                f"Update abandoned after {MAX_HOLD_S:.0f}s so the queue "
+                f"could continue; it stopped before the slot flip, so the "
+                f"device still runs its current firmware",
+            )
+            return
+        if staged is not None:
+            await _flip_and_confirm(device_id, release["version"], *staged)
     finally:
         in_progress.discard(device_id)
         # Release LAST, so the next queued device does not start its transfer
@@ -192,11 +207,15 @@ async def run_update(device_id: str, release: dict,
 
 
 async def _run_update_locked(device_id: str, release: dict,
-                             binary_override: bytes | None = None) -> None:
+                             binary_override: bytes | None = None
+                             ) -> tuple[object, str, str | None] | None:
     """
-    The update itself, run with `queue` already held. Split from
-    `run_update` so the whole of it can sit under one timeout — the queue is
-    only as safe as its slowest member.
+    The update up to a verified binary in the inactive slot, run with `queue`
+    already held. Split from `run_update` so all of it can sit under one
+    timeout, since the queue is only as safe as its slowest member.
+
+    Returns (live, slot, previous version) for `_flip_and_confirm`, or None
+    once a failure has been reported.
     """
     loop = asyncio.get_event_loop()
     version = release["version"]
@@ -241,7 +260,7 @@ async def _run_update_locked(device_id: str, release: dict,
             "  echo \"SLOT:server_a MIGRATED\" || echo \"MIGRATE_FAILED\"; "
             "fi"
         )
-        detect_result = await em_shell.run(live, detect_cmd, timeout=60.0)
+        detect_result = await em_shell.run(live, detect_cmd, timeout=60.0, lock_wait=DETECT_LOCK_WAIT_S)
         log.info(f"[api] Slot detect result for {device_id}: {detect_result!r}")
 
         if "MIGRATE_FAILED" in detect_result:
@@ -328,7 +347,7 @@ async def _run_update_locked(device_id: str, release: dict,
 
         # Stream binary to inactive slot. Verified by md5 before it is renamed
         # into place, so a corrupt transfer leaves the slot as it was and never
-        # reaches the symlink flip below (#76).
+        # reaches the symlink flip (#76).
         ok = await _stream_binary_to_slot(live, binary, inactive_slot)
         if not ok:
             # Name the stage. "failed or did not verify" covered everything
@@ -339,6 +358,26 @@ async def _run_update_locked(device_id: str, release: dict,
                                  f"{ok} — {inactive_slot} left untouched")
             return
 
+        return live, inactive_slot, current_ver
+
+    except Exception as e:
+        log.exception(f"[api] OTA update error for {device_id}: {e}")
+        await _update_failed(device_id, f"OTA exception: {e}")
+
+
+async def _flip_and_confirm(device_id: str, version: str, live,
+                            inactive_slot: str, current_ver: str | None) -> None:
+    """
+    Restart the device onto the slot `_run_update_locked` filled and verified,
+    then watch it come back and report what it did.
+
+    Outside MAX_HOLD_S with the queue still held, so the cap can never report
+    "abandoned" for an Echo already restarting onto the new binary. Every
+    step bounds itself: the shell call has its lock wait, session open and
+    silence limits, and the watch gives up 90s after it starts.
+    """
+    loop = asyncio.get_event_loop()
+    try:
         # Brief pause so device can cleanly close the transfer shell before
         # we open a new one for the symlink flip.
         await asyncio.sleep(1.0)
@@ -466,7 +505,8 @@ async def run_rollback(device_id: str, target_version: str) -> None:
             "CURRENT=$(readlink /data/local/bin/server 2>/dev/null); "
             "if [ \"$CURRENT\" = \"server_a\" ] || [ \"$CURRENT\" = \"server_b\" ]; then "
             "  echo \"SLOT:$CURRENT\"; "
-            "else echo \"SLOT_UNKNOWN\"; fi"
+            "else echo \"SLOT_UNKNOWN\"; fi",
+            lock_wait=DETECT_LOCK_WAIT_S,
         )
         for line in detect_result.splitlines():
             if "SLOT:" in line:

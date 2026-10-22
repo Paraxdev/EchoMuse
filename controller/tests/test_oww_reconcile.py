@@ -118,7 +118,7 @@ def env(monkeypatch):
 
 def _shell_says(monkeypatch, env, *answers):
     """em_shell.run_strict answering from a script; an exception entry raises."""
-    async def fake(live, cmd, timeout=30.0):
+    async def fake(live, cmd, timeout=30.0, silence_s=None):
         env["shell"].append(cmd)
         a = answers[min(len(env["shell"]) - 1, len(answers) - 1)]
         if isinstance(a, BaseException):

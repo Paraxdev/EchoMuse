@@ -766,10 +766,9 @@ def test_a_failed_update_asks_for_the_supervisor_log():
     from pathlib import Path
     api = (Path(__file__).resolve().parent.parent / "em_api.py").read_text()
 
-    # The failure paths live in _run_update_locked, which is what awaits
-    # _monitor_reconnect and decides what its result means. (_run_update is
-    # now the queue wrapper in front of it.)
-    monitor = _sources.def_source("em_ota._run_update_locked")
+    # The failure paths live in _flip_and_confirm, which is what awaits
+    # _monitor_reconnect and decides what its result means.
+    monitor = _sources.def_source("em_ota._flip_and_confirm")
     assert monitor.count("supervisor_log_wanted.add") >= 2, (
         "both update-failure paths (auto-rollback and timeout) must request "
         "the supervisor log"
@@ -954,19 +953,28 @@ def test_a_corrupt_binary_never_reaches_the_symlink_flip():
     The real win of verifying is not the error message, it is the ordering:
     a mismatch must be caught while the device is still running fine, not
     after it has taken a reboot and a rollback to tell us the same thing.
-    """
-    src = (CONTROLLER / "em_ota.py").read_text()
-    ota = src[src.index("_stream_binary_to_slot(live, binary"):]
-    ota = ota[:ota.index("_monitor_reconnect")]
 
-    guard = ota.index("if not ok:")
-    flip  = ota.index("ln -sf")
-    assert guard < flip, (
-        "the transfer result must be checked BEFORE the symlink flip"
+    The flip is in _flip_and_confirm, which run_update calls only with what
+    _run_update_locked returned, so a failed transfer has to return nothing.
+    """
+    locked = _sources.def_source("em_ota._run_update_locked")
+    # The flip restarts the server; the detect's legacy migration also runs
+    # an `ln -sf`, so the kill is what marks it.
+    assert "kill $PPID" not in locked, "the flip must stay out of the capped half"
+    guard = next(n for n in ast.walk(ast.parse(locked))
+                 if isinstance(n, ast.If) and ast.unparse(n.test) == "not ok")
+    last = guard.body[-1]
+    assert isinstance(last, ast.Return) and last.value is None, (
+        "a failed transfer must return nothing, not fall through to the flip, "
+        "or verification changes the log message and nothing else"
     )
-    assert "return" in ota[guard:flip], (
-        "a failed transfer must return, not fall through to the flip — "
-        "otherwise verification changes the log message and nothing else"
+
+    assert "kill $PPID" in _sources.def_source("em_ota._flip_and_confirm")
+    run = ast.parse(_sources.def_source("em_ota.run_update"))
+    gate = next(n for n in ast.walk(run) if isinstance(n, ast.If)
+                and any("_flip_and_confirm" in ast.unparse(s) for s in n.body))
+    assert ast.unparse(gate.test) == "staged is not None", (
+        "the flip must run only on what the locked half handed back"
     )
 
 
@@ -2104,6 +2112,10 @@ def test_firmware_updates_are_serialised_across_the_whole_controller():
     assert not re.search(r"\bqueue\b", inner), (
         "the locked half must not touch the lock — one owner, or a release "
         "on a path that never acquired frees somebody else's turn"
+    )
+    flip = _strip_prose(_sources.def_source("em_ota._flip_and_confirm"))
+    assert not re.search(r"\bqueue\b", flip), (
+        "the flip and watch run with the lock held and must not touch it either"
     )
 
     # Bounded, or one wedged device holds the whole fleet's queue: the base64
