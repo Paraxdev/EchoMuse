@@ -124,6 +124,79 @@ if 'emOS: warn and carry on' not in s:
 PYEOF
 cd ..
 
+# 5. The MT8163's driver can refuse the PTK for a moment after the 4-way
+#    handshake derives it, and hostap gives up on the first refusal. Seen on an
+#    Echo Dot Gen 2 under emOS joining a mesh router: "WPA: Failed to set
+#    PTK to the driver (alg=3 keylen=16 ... key_flag=0xc)", a locally generated
+#    deauth, then "4-Way Handshake failed - pre-shared key may be incorrect"
+#    with the right key, round after round until CONN_FAILED. The same build
+#    joins another router. Reversing the driver showed it accepts a CCMP 16-byte
+#    pairwise key at every validation layer; the only ways mtk_cfg80211_add_key
+#    fails it are transient (adapter not ready, command buffers exhausted, the
+#    firmware not acking the add-key command in time), all flattened to
+#    -EINVAL, and the same key installs once the firmware has caught up.
+#
+#    So the install is retried, 3 more tries 150 ms apart, in
+#    wpa_supplicant_install_ptk(), which both the first handshake and a PTK
+#    rekey go through. On success nothing changes, and after the last refusal
+#    it fails exactly as upstream does. Retrying there is the smallest change
+#    that reaches the failing call: retrying from send_4_of_4 would resend a
+#    frame that was never the problem, and a fixed delay before the install
+#    would slow every join on every router to cover one. A pairwise key for a
+#    unicast address is a single NL80211_CMD_NEW_KEY, so a retry repeats
+#    nothing that already succeeded, and the TK is only cleared on success.
+cd "wpa_supplicant-$WPA_VER"
+python3 - <<'PYEOF'
+p='src/rsn_supp/wpa.c'
+s=open(p).read()
+dold = """static int wpa_supplicant_install_ptk(struct wpa_sm *sm,
+				      const struct wpa_eapol_key *key,
+				      enum key_flag key_flag)
+{
+	int keylen, rsclen;
+"""
+dnew = """static int wpa_supplicant_install_ptk(struct wpa_sm *sm,
+				      const struct wpa_eapol_key *key,
+				      enum key_flag key_flag)
+{
+	int keylen, rsclen, res, retry;
+"""
+old = """	if (wpa_sm_set_key(sm, alg, sm->bssid, sm->keyidx_active, 1, key_rsc,
+			   rsclen, sm->ptk.tk, keylen,
+			   KEY_FLAG_PAIRWISE | key_flag) < 0) {
+		wpa_msg(sm->ctx->msg_ctx, MSG_WARNING,
+			"WPA: Failed to set PTK to the driver (alg=%d keylen=%d bssid="
+"""
+new = """	res = wpa_sm_set_key(sm, alg, sm->bssid, sm->keyidx_active, 1, key_rsc,
+			     rsclen, sm->ptk.tk, keylen,
+			     KEY_FLAG_PAIRWISE | key_flag);
+	/* emOS: the MT8163 driver refuses a valid key while its firmware is
+	 * not ready, see tools/build-wpa-supplicant.sh. The sleep blocks the
+	 * event loop for at most 450 ms, which is acceptable here: emOS runs
+	 * one interface, frames that arrive meanwhile wait in their sockets,
+	 * and the AP's EAPOL retransmit timeout is longer than that. */
+	for (retry = 1; res < 0 && retry <= 3; retry++) {
+		wpa_msg(sm->ctx->msg_ctx, MSG_INFO,
+			"WPA: PTK install retry %d/3, the driver refused it",
+			retry);
+		os_sleep(0, 150000);
+		res = wpa_sm_set_key(sm, alg, sm->bssid, sm->keyidx_active, 1,
+				     key_rsc, rsclen, sm->ptk.tk, keylen,
+				     KEY_FLAG_PAIRWISE | key_flag);
+	}
+	if (res < 0) {
+		wpa_msg(sm->ctx->msg_ctx, MSG_WARNING,
+			"WPA: Failed to set PTK to the driver (alg=%d keylen=%d bssid="
+"""
+if 'emOS: the MT8163 driver refuses' not in s:
+    assert s.count(dold) == 1, "wpa.c wpa_supplicant_install_ptk declarations not found"
+    assert s.count(old) == 1, "wpa.c wpa_supplicant_install_ptk set_key site not found"
+    s = s.replace(dold, dnew, 1).replace(old, new, 1)
+    open(p,'w').write(s)
+    print("wpa.c patched (PTK install retry)")
+PYEOF
+cd ..
+
 # 3. hostap's priv_netlink.h redefines the same structs. The system includes
 #    must come BEFORE its #ifndef IFLA_* fallbacks, or those become macros and
 #    the kernel enums fail to parse.
