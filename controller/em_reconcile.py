@@ -4,8 +4,8 @@ What a device has installed, brought back in line when it connects.
 A device arriving is the one moment we know what it has: its wake word
 assets, start script, controller address list and (on Android) the debloat
 payload are checked here, debounced per device. An emOS device's previous
-boot is examined for a crash first, and its update trial confirmed, neither
-debounced.
+boot is examined for a crash first, its update trial confirmed, and a network
+log it kept from an outage collected, none of them debounced.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ import time
 import em_crashlog
 import em_emos_ota
 import em_events
+import em_netlast
 import em_oww_sync
 import em_payloads
 import em_shell
@@ -100,6 +101,45 @@ async def _collect_crash_log(live, device_id: str) -> None:
     await em_shell.run(live, f"echo {md5} > {seen}")
 
 
+async def _collect_net_last(live, device_id: str) -> None:
+    """
+    Report the network log an emOS device kept from an outage (em_netlast).
+
+    The crash log's shape: a marker on the device names the copy already
+    reported, so each is reported once however often the device reconnects,
+    and it is written only after a complete read. A device whose init predates
+    the copy has no file, and nothing happens. No retry when the shell does
+    not answer: the crash log check just before has already waited for it,
+    and the next connect asks again.
+    """
+    path, seen = em_netlast.NETLAST_PATH, em_netlast.SEEN_PATH
+    probe = await em_shell.run(
+        live, f"busybox md5sum {path} 2>/dev/null; cat {seen} 2>/dev/null; "
+              f"echo {em_shell.OK_MARK}")
+    if em_shell.OK_MARK not in probe:
+        return
+    m = re.search(r"\b([0-9a-f]{32})\s+" + re.escape(path), probe)
+    if not m:
+        return  # no copy: no outage since this init, or an older init
+    md5 = m.group(1)
+    if probe.count(md5) > 1:
+        return  # this copy was already reported
+    await asyncio.sleep(1.0)  # let the probe's shell session close
+    out = await em_shell.run(live, f"cat {path}; echo {em_shell.OK_MARK}",
+                             timeout=60.0)
+    if em_shell.OK_MARK not in out:
+        log.info(f"[api] [{device_id}] network log: read incomplete, will "
+                 f"retry on the next connect")
+        return
+    msg = em_netlast.summarise(out[:out.rindex(em_shell.OK_MARK)])
+    if msg:
+        log.warning(f"[api] [{device_id}] emOS kept a network log from an "
+                    f"outage, saved to the device's log events")
+        await em_events.push_log(device_id, "warning", "network", msg)
+    await asyncio.sleep(1.0)
+    await em_shell.run(live, f"echo {md5} > {seen}")
+
+
 async def on_connect(device_id: str, live) -> None:
     """
     Bring a freshly-connected device's three installed payloads back in line.
@@ -144,6 +184,12 @@ async def on_connect(device_id: str, live) -> None:
             await em_emos_ota.status_on_connect(live, device_id)
         except Exception as e:
             log.warning(f"[api] [{device_id}] emOS status check failed ({e})")
+        # After the trial check, which has TRIAL_SECS; not debounced, since a
+        # device back from an outage is exactly the one reconnecting.
+        try:
+            await _collect_net_last(live, device_id)
+        except Exception as e:
+            log.warning(f"[api] [{device_id}] network log check failed ({e})")
     if not _due(device_id, time.monotonic()):
         return
 
