@@ -423,9 +423,12 @@ DATA_RECONNECT_GRACE_S = 3.0
 # #315: the control plane gets the same treatment the data plane has had —
 # a device whose control connection drops during a controller restart, an
 # add-on update or a link excursion keeps its ESPHome entities, BLE proxy
-# and media session for this long before they are released. The device's
-# own reconnect (endpoint pinned, per #106) lands well inside the window.
-CONTROL_RECONNECT_GRACE_S = 5.0
+# and media session for this long before they are released. It has to outlast
+# the device's own redial, which waits 5s after any drop and then probes the
+# last-known controller for up to 3s (client/control.go): at 5s, 35 of 118
+# reconnects on one Echo came back at 5.0-13.2s, just too late, and each one
+# took HA's ESPHome voice and Bluetooth proxy ports down and back up.
+CONTROL_RECONNECT_GRACE_S = 20.0
 
 
 class Device:
@@ -5063,7 +5066,6 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         version      = msg.get("version")
         capabilities = msg.get("capabilities", [])
 
-        loop         = asyncio.get_event_loop()
         approval_mode = await loop.run_in_executor(
             None, db.get_config, "device_approval", DEVICE_APPROVAL
         )
@@ -5304,6 +5306,8 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         await api.notify_device_connected(device_id)
         _device_ref = device
         async def _standalone_play(pcm_bytes: bytes, _d=_device_ref) -> bool:
+            if em_state.devices.get(_d.device_id) is not _d:
+                return False  # its link dropped; HA holds this callback through the reconnect grace
             # Same acoustic-feedback guard as voice turns: announcements
             # play outside a turn, so the always-on OWW stream is live —
             # stop it for the duration and put it back after. An active
