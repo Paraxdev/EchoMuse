@@ -3,6 +3,9 @@
 __pycache__
 /device/build/
 /emos/build/
+# Local app folders from controller/tools/make_dev_addon.sh and
+# tools/fork/build_app.sh.
+/dist/
 controller/.env
 controller/.venv/
 controller/data/
