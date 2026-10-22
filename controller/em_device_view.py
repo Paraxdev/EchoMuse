@@ -23,6 +23,7 @@ import em_pairing
 import em_releases
 import em_state
 import em_volume
+import em_wakepatience
 import em_wsclose
 from version import firmware_update as _firmware_update
 
@@ -256,6 +257,8 @@ def merge_device(row, boot: dict | None = None) -> dict:
         # without being able to act on it, and offering those "on" produces a
         # device that never answers.
         "owwTriggerCapable": getattr(live, "oww_trigger_capable", False) if live else False,
+        "owwPatienceCapable":
+            em_wakepatience.CAPABILITY in (getattr(live, "capabilities", []) or []) if live else False,
         # Firmware that asks to pair itself (the owner holds the button); for
         # older firmware on a plain link the dashboard offers Pair instead.
         "pairingCapable":   getattr(live, "pairing_capable", False) if live else False,

@@ -50,15 +50,21 @@ configuration:
       this affects only devices added from now on — existing devices keep the
       port they were given.
   oww_model:
-    name: Wake word model
+    name: Wake word model (fallback)
     description: >-
-      OpenWakeWord model to use, without the _v0.1.onnx suffix.
-      For example: hey_jarvis.
+      Not the wake word your Echoes listen for. That is chosen in the
+      EchoMuse dashboard (Config, Wake word), which starts on Hey Jarvis and
+      takes precedence over this option. The controller uses this model only
+      if the dashboard's saved choice cannot be read. Name without the
+      _v0.1.onnx suffix, for example hey_jarvis.
   oww_threshold:
-    name: Wake word sensitivity
+    name: Wake word sensitivity (fallback)
     description: >-
-      Detection threshold from 0 to 1. Lower values are more sensitive and
-      may produce more false detections. The upstream default is 0.5.
+      Not the threshold your Echoes wake at. That is the Sensitivity set in
+      the EchoMuse dashboard (Config, Wake word), which starts at 0.5 and
+      takes precedence over this option. The controller uses this value, 0
+      to 1 with lower more sensitive, only if the dashboard's saved setting
+      cannot be read. It is never sent to an Echo.
   require_device_tls:
     name: Require encrypted device connections
     description: >-

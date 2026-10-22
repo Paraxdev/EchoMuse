@@ -35,6 +35,7 @@ from typing import Optional
 import em_config_sections
 import em_recordings
 import em_wake_samples
+import em_wakepatience
 
 log = logging.getLogger("echomuse.db")
 
@@ -148,6 +149,8 @@ DEFAULT_DEVICE_CONFIG = {
     # trades recall for false positives (see oww_forge/README.md).
     "owwThreshold":     0.5,
     # The ceiling is OWW_THRESHOLD_MAX below, enforced on every write.
+    # Frames in a row at owwThreshold to wake, 1-4; 1 is the old rule (em_wakepatience).
+    "owwPatience":      2,
     # Barge-in (§3.2, controller-side): wake word spoken during TTS playback
     # cancels it and starts a fresh turn. Requires device AEC (aecEnabled)
     # on — with barge-in the mic streams through playback, and AEC is what
@@ -1903,6 +1906,7 @@ def set_device_config(device_id: str, config: dict) -> None:
     live device over the control WebSocket if it is currently connected.
     """
     config = _clamp_wake_sample_minimum(_clamp_wake_threshold(config, device_id), device_id)
+    config = em_wakepatience.clamp_config(config, device_id)
     with _tx() as conn:
         conn.execute(
             "UPDATE devices SET config = ? WHERE device_id = ?",
@@ -2014,6 +2018,7 @@ def get_global_device_config_raw() -> dict:
 def set_global_device_config(config: dict) -> None:
     """Persist updated fleet-wide default device config."""
     config = _clamp_wake_sample_minimum(_clamp_wake_threshold(config, "fleet"), "fleet")
+    config = em_wakepatience.clamp_config(config, "fleet")
     with _tx() as conn:
         conn.execute(
             "INSERT OR REPLACE INTO system_config (key, value) VALUES ('global_device_config', ?)",

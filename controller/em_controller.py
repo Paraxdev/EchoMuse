@@ -105,6 +105,7 @@ import em_shadow
 import em_health
 import em_wake_samples
 import em_oww_warmup
+import em_wakepatience
 import em_barge
 import em_listen
 import em_ble_gatt
@@ -542,6 +543,7 @@ class Device:
         # caching a snapshot at startup, so config changes take effect
         # without requiring a device reconnect.
         self.oww_threshold: float = OWW_THRESHOLD
+        self.oww_patience:  int   = em_wakepatience.DEFAULT
         self.oww_model:     str   = f"{OWW_MODEL}_v0.1"
         # Multi-device wake arbitration window (ms, 0 = off). Only
         # consulted when 2+ devices are connected — a solo fleet never
@@ -3523,6 +3525,7 @@ async def _stream_listen(device: Device):
     # noise until the window has refilled. Un-warmed at construction to match
     # the model above; re-armed at every reset() below. See em_oww_warmup.
     warmup = em_oww_warmup.WarmupGate()
+    run = em_wakepatience.Run()  # reset at every gap in the audio below
     last_near_miss_log_ts = 0.0  # Q4: rate-limit near-miss INFO logging to 1/2s
     nm_pending = 0    # near-misses buffered since the last hourly-rollup flush
     nm_max     = 0.0  # highest buffered near-miss score
@@ -3701,6 +3704,7 @@ async def _stream_listen(device: Device):
                 device.mic_queue, payload, loop.time())
             if skipped:
                 buf.clear()
+                run.reset()
                 device.wake_levels.clear()
                 if note := backlog_log.add(skipped, loop.time()):
                     log.warning(f"[{device.device_id}] OWW: {note}")
@@ -3712,15 +3716,18 @@ async def _stream_listen(device: Device):
             # stream boundary.
             if payload is None or isinstance(payload, str):
                 buf.clear()
+                run.reset()
                 device.wake_levels.clear()
                 continue
 
             if device.oww_paused.is_set():
+                run.reset()
                 continue
 
             if not em_wakeword.wake_allowed(mic_muted=device.muted,
                                             enabled=device.wake_word_enabled):
                 buf.clear()
+                run.reset()
                 device.wake_levels.clear()
                 if (em_wakeword.stray_stream(mic_muted=device.muted,
                                              enabled=device.wake_word_enabled)
@@ -3751,6 +3758,7 @@ async def _stream_listen(device: Device):
                 # threshold below rather than the wake threshold.
                 ringing = device.timer_alarm_ringing
                 if device.speaking and not ringing:
+                    run.reset()
                     continue
 
                 # Per-room noise floor tracking (measurement only — the audio
@@ -3848,17 +3856,21 @@ async def _stream_listen(device: Device):
                             ),
                         )
 
-                # Who gets to start a turn. In "on" mode the device decides and
-                # this controller's own crossing is demoted to a measurement —
-                # see em_shadow.decide_wake_source for why it keeps scoring at
-                # all. In every other mode this is exactly the old condition.
+                # Who gets to start a turn: the old condition, held for
+                # owwPatience frames in a row at the normal bar (em_wakepatience).
+                # In "on" mode the device decides, and each crossing here is
+                # only a measurement, whatever the patience; see
+                # em_shadow.decide_wake_source for why it keeps scoring at all.
                 if not trusted and score >= eff_threshold:
                     log.info(
                         f"[{device.device_id}] Wake score {score:.3f} >= "
                         f"{eff_threshold:.3f} ignored — openwakeword warm-up, "
                         f"{warmup.progress()} chunks since reset"
                     )
-                ctrl_hit = trusted and score >= eff_threshold
+                need = em_wakepatience.need(device.oww_patience, eff_threshold, device.oww_threshold)
+                ctrl_hit = run.feed(trusted, score >= eff_threshold, score, need)
+                if device.oww_on_device != em_shadow.MODE_ON and (note := run.report(loop.time())):
+                    log.info(f"[{device.device_id}] OWW: {note}")
                 dev_wake, dev_age = device.pending_wake.take()
                 if dev_wake is None and dev_age is not None:
                     # Expired before anything could act on it. Worth a warning
@@ -3881,7 +3893,7 @@ async def _stream_listen(device: Device):
                         device_score=(dev_wake["score"] if dev_wake is not None else None),
                         trigger_source=(source if source != "none" else None),
                     )
-                if ctrl_hit and device.oww_on_device == em_shadow.MODE_ON:
+                if trusted and score >= eff_threshold and device.oww_on_device == em_shadow.MODE_ON:
                     # "on" mode, and this controller heard it too. Recorded for
                     # the comparison and nothing else — the device is driving.
                     #
@@ -3913,6 +3925,7 @@ async def _stream_listen(device: Device):
                         f"(source={source}, score={score:.3f}, "
                         f"threshold={eff_threshold:.3f}, "
                         f"rms={rms:.4f}, floor={device.noise_floor:.4f}"
+                        + (f", frames={run.frames}/{need}" if source == "controller" else "")
                         + (f", scored {(loop.time() - arrived) * 1000:.0f}ms "
                            f"after arrival, {(arrived - heard) * 1000:.0f}ms "
                            f"in transit" if source == "controller" else "")
@@ -5217,6 +5230,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         await device.send_control({"type": "config", **config})
         device.oww_threshold = float(config.get("owwThreshold", OWW_THRESHOLD))
         device.oww_model     = config.get("owwModel", f"{OWW_MODEL}_v0.1")
+        device.oww_patience  = em_wakepatience.clamp(config.get("owwPatience"))
         device.wake_arb_ms   = int(config.get("wakeArbitrationMs", 300))
         device.mic_gain_db   = float(config.get("micGainDb", 24))
         device.adc_gains     = (int(config.get("adcMicpga", 40)),
@@ -6072,6 +6086,9 @@ async def event_loop_lag_monitor(interval: float = 1.0,
 async def main():
     log.info(f"EchoMuse Controller {CONTROLLER_VERSION}")
     db.init(DB_PATH)
+    if note := em_oww_models.env_fallback_note(
+            os.environ, await asyncio.to_thread(db.get_global_device_config)):
+        log.warning(note)
     auth.maybe_generate_bootstrap_token()
     em_player.init(
         get_device=em_state.devices.get,

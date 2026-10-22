@@ -161,6 +161,42 @@ def test_triggering_is_a_separate_capability_from_scoring():
         "the dashboard must gate the 'On device' option on the capability"
 
 
+def test_patience_is_gated_on_its_capability_where_the_echo_decides():
+    """
+    The controller applies owwPatience to every wake it decides. An Echo that
+    decides its own wakes applies it only on firmware announcing the
+    capability, so there the control is disabled with the reason, and only
+    there: the controller deciding needs nothing from the firmware.
+    """
+    import em_wakepatience
+    assert em_wakepatience.CAPABILITY == "oww_patience"
+    assert "owwPatienceCapable" in _device_record()
+    jsx = (ROOT / "controller" / "static" / "dashboard.jsx").read_text()
+    assert "patienceCapable={!device.connected || !!device.owwPatienceCapable}" in jsx
+    assert "disabled={patienceOff}" in jsx
+    gate = re.search(r"const patienceOff = ([^;]+);", jsx)
+    assert gate and "wakeBy === 'device'" in gate.group(1) \
+        and "!patienceCapable" in gate.group(1)
+
+
+def test_the_patience_capability_and_its_config_field_arrive_together():
+    """
+    Coordinated by name with the firmware, which may land separately: once
+    its ConfigMessage decodes owwPatience it must announce exactly
+    oww_patience, and the reverse. Either alone is a dashboard gating on a
+    string the firmware never sends, or firmware that applies a setting the
+    dashboard keeps disabled.
+    """
+    import em_wakepatience
+    config_go = (ROOT / "device" / "internal" / "config" / "config.go").read_text()
+    decodes = re.search(r'`json:"owwPatience[",]', config_go) is not None
+    announces = em_wakepatience.CAPABILITY in device_capabilities()
+    assert decodes == announces, (
+        f"config.go {'decodes' if decodes else 'does not decode'} owwPatience "
+        f"but control.go {'announces' if announces else 'does not announce'} "
+        f"{em_wakepatience.CAPABILITY!r}")
+
+
 def test_remote_volume_arc_is_capability_gated():
     """Old firmware must not be offered a toggle it cannot honour."""
     assert "remote_volume_arc" in device_capabilities()

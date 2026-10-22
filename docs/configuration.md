@@ -341,10 +341,28 @@ The confidence bar the recogniser must clear.
 - Toward **Eager**: catches you more reliably, but expect the occasional
   ghost activation.
 
-**How to tune it**: the Status tab counts **near-misses** — moments where the
+**How to tune it**: the Activity tab counts **near-misses**, moments where the
 score came close but didn't trigger. If you're being ignored and see
 near-misses climbing, move one step toward Eager. If it wakes up when nobody
-spoke, move toward Precise.
+spoke, move toward Precise, or raise **Patience**.
+
+### Patience
+How many 80 ms frames in a row must reach the Sensitivity threshold before
+it counts as a wake, from 1 to 4. The default is 2: a spoken wake word stays
+above the threshold for several frames as you say it, while a click, a knock
+or a bump on the table is over in one, so 2 ignores those at the cost of
+80 ms on a real wake. 1 is how EchoMuse behaved before this setting existed.
+Raise it to 3 if single sounds still wake the Echo; go back to 1 if a short
+wake word starts being missed.
+
+When the controller listens for the wake word, it applies Patience itself
+and its log says how many frames each wake held, and logs a run that was too
+short as "not a wake". An Echo set to **On this Echo** applies it only with
+firmware that supports it (it announces `oww_patience`); on older firmware
+the control is shown disabled with the reason, and that Echo wakes on a
+single frame. Patience is for the normal threshold only: at the lower
+**Barge threshold** the controller keeps its old rules, two frames in a row
+over a reply (see Barge-in) and one while music plays or a timer rings.
 
 ### Barge-in
 Lets the wake word **interrupt the assistant mid-turn** — say the wake word
@@ -911,7 +929,7 @@ These are set once, on the server, and need a controller restart to change:
 |---|---|
 | `SERVER_IP` | The controller computer's LAN IP — what devices are told to connect to. Leave it empty to detect it from this host; the controller refuses to start rather than advertise an address it had to guess at, and warns if the detected one looks like a container bridge. mDNS is advertised on this address's interface only, so Home Assistant has to be on the same network to discover the Echoes; if the address is not one of this host's, the controller says so in its log and advertises on every interface. |
 | `DB_PATH` | Where the database is kept. The device certificates and recordings are stored beside it. The published image defaults to `/app/data/echomuse.db`, the folder the compose files mount, so it survives an update with or without a `.env`. Bare-metal installs should set it. |
-| `OWW_MODEL` / `OWW_THRESHOLD` | Startup defaults for wake word/sensitivity — the dashboard values override these. |
+| `OWW_MODEL` / `OWW_THRESHOLD` | Fallbacks only. The wake word and its sensitivity are set under Config, Wake word in the dashboard, which starts on Hey Jarvis at 0.5 whatever these say and takes precedence; the controller uses these only if that saved setting cannot be read, and logs a warning at start when they differ from it. The add-on options of the same names work the same way. |
 | `DEVICE_APPROVAL` | `strict` (you approve every new device — recommended) or `auto`. |
 | `SERVER_TLS_PORT` | Encrypted device link (wss) port — default 8770, `0` disables. Don't set `0` once Echoes are paired: an Echo holding credentials will not fall back to the plain link. Devices switch to it automatically once they hold credentials: from the wizard, from approving a new device, or from pairing (hold the Echo's action button 5 s, then **Approve pairing**). |
 | `REQUIRE_DEVICE_TLS` | Set to `1` **only after every device shows "wss (TLS)"** on its Status tab — from then on the controller rejects unencrypted or tokenless device connections. |
