@@ -1066,6 +1066,17 @@ static long mono_ms(void)
     return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
 }
 
+/* Whole seconds on the same clock, for anything that has to keep counting
+ * past 24.8 days of uptime: `long` is 32 bits on the armv7 init, and
+ * mono_ms() overflows it there. */
+static long mono_s(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return 0;
+    return ts.tv_sec;
+}
+
 static void note(const char *fmt, ...)
 {
     char line[256];
@@ -1320,8 +1331,11 @@ static void usbwr(const char *leaf, const char *val)
  * NOW", read over the console while the device is still running, and a crash
  * that spans a reboot is what the last_kmsg copies are for.
  *
- * Capped and rotated, because filling a tmpfs is its own failure. */
+ * Capped and rotated, because filling a tmpfs is its own failure. Overridable
+ * so netcheck.c can point it at a file of its own. */
+#ifndef NETLOG
 #define NETLOG     "/run/net.log"
+#endif
 #define NETLOG_CAP (128 * 1024)
 
 /* The WiFi stage runs in a forked child, so it must NOT use note(): fork copies
@@ -1492,6 +1506,41 @@ static int run_wait(char *const argv[])
     return st;
 }
 
+/* The default gateway on `iface`, or on any interface when it is NULL, read
+ * from the kernel's table as /proc/net/route prints it: each address is the
+ * raw 32-bit value in hex, so on this little-endian SoC the first octet is the
+ * low byte. -1 when there is no default route. */
+#ifndef ROUTES
+#define ROUTES "/proc/net/route"
+#endif
+
+static int default_gateway(const char *routes, const char *iface,
+                           char *out, size_t n)
+{
+    FILE *f = fopen(routes, "r");
+    if (!f)
+        return -1;
+    char line[256], name[32];
+    unsigned dest, gw, flags, mask;
+    int refcnt, use, metric, rc = -1;
+    while (rc < 0 && fgets(line, sizeof line, f)) {
+        if (sscanf(line, "%31s %x %x %x %d %d %d %x", name, &dest, &gw,
+                   &flags, &refcnt, &use, &metric, &mask) != 8)
+            continue;
+        /* RTF_UP | RTF_GATEWAY, and a /0: a host or subnet route via a
+         * router is not the way out. */
+        if (dest || mask || !gw || (flags & 0x3) != 0x3)
+            continue;
+        if (iface && strcmp(name, iface) != 0)
+            continue;
+        snprintf(out, n, "%u.%u.%u.%u", gw & 0xff, (gw >> 8) & 0xff,
+                 (gw >> 16) & 0xff, (gw >> 24) & 0xff);
+        rc = 0;
+    }
+    fclose(f);
+    return rc;
+}
+
 /* Write /etc/resolv.conf pointing at the default gateway.
  *
  * The device has NO working DNS otherwise: FireOS keeps resolvers in Android
@@ -1509,20 +1558,7 @@ static char gwip[32];
 
 static void write_resolv_conf(void)
 {
-    FILE *f = fopen("/proc/net/route", "r");
-    if (!f)
-        return;
-    char line[256], iface[32];
-    unsigned dest, gw;
-    while (fgets(line, sizeof line, f)) {
-        if (sscanf(line, "%31s %x %x", iface, &dest, &gw) == 3 && dest == 0 && gw) {
-            snprintf(gwip, sizeof gwip, "%u.%u.%u.%u",
-                     gw & 0xff, (gw >> 8) & 0xff, (gw >> 16) & 0xff, (gw >> 24) & 0xff);
-            break;
-        }
-    }
-    fclose(f);
-    if (!gwip[0])
+    if (default_gateway(ROUTES, NULL, gwip, sizeof gwip) != 0)
         return;
     int fd = open("/etc/resolv.conf", O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0)
@@ -1613,6 +1649,23 @@ static int ifup(const char *name)
     int r = ioctl(s, SIOCGIFFLAGS, &ifr);
     if (r == 0) {
         ifr.ifr_flags |= IFF_UP | IFF_RUNNING;
+        r = ioctl(s, SIOCSIFFLAGS, &ifr);
+    }
+    close(s);
+    return r;
+}
+
+static int ifdown(const char *name)
+{
+    struct ifreq ifr;
+    int s = socket(AF_INET, SOCK_DGRAM, 0);
+    if (s < 0)
+        return -1;
+    memset(&ifr, 0, sizeof ifr);
+    strncpy(ifr.ifr_name, name, IFNAMSIZ - 1);
+    int r = ioctl(s, SIOCGIFFLAGS, &ifr);
+    if (r == 0) {
+        ifr.ifr_flags &= ~IFF_UP;
         r = ioctl(s, SIOCSIFFLAGS, &ifr);
     }
     close(s);
@@ -1999,6 +2052,162 @@ static int udhcpc_is_ours(const char *udhcpc, const char *ours)
     return realpath(udhcpc, a) && realpath(ours, b) && strcmp(a, b) == 0;
 }
 
+/* ── The link watchdog ───────────────────────────────────────────────────────
+ *
+ * The supervisor below reacts to two things on its own: carrier going away,
+ * and an address that never arrives. An Echo that keeps both while nothing
+ * reaches it was invisible to it, and that is how a FireOS 6 Echo stayed off
+ * the network for hours to days at a time without rebooting, ARP for it
+ * INCOMPLETE from the LAN, the long outages lining up with the router's
+ * automatic channel change (2026-10). hostap 2.10 here runs no bgscan, so
+ * nothing else ever asks the supplicant to look again.
+ *
+ * So once the network has been up in this boot, the gateway is asked every
+ * WD_PROBE_S whether it still hears us, and a device that has been off the
+ * network for WD_GRACE_S is pushed back on, harder each time:
+ *
+ *   1. `wpa_cli reassociate`, which rescans first, so a BSS that changed
+ *      channel is found where it went;
+ *   2. `disconnect`, then `reconnect`;
+ *   3. the supplicant restarted and wlan0 bounced, then the same again with
+ *      the gap doubling to an hour, so a network that is simply gone (router
+ *      off, WLAN switched off at night) costs one restart an hour.
+ *
+ * Off the network is any of: the gateway did not answer ARP, carrier with no
+ * address, no carrier. Without carrier the loop already nudges reassociate
+ * every 15s, so steps 1 and 2 would only repeat it and the restart comes
+ * first. A probe that could not be asked (no gateway, no arping) is no
+ * evidence either way and ends the run: nothing is ever done on the strength
+ * of not knowing. Nor before the boot's first address, where the ring and the
+ * log already say what is wrong and provisioning may still be writing the
+ * conf.
+ *
+ * The ladder resets after WD_SETTLE_S of answers, not on the first, so a link
+ * that answers once between failures still backs off. linkwd_step is the whole
+ * decision; netcheck.c drives it. Seconds from mono_s(). */
+enum { LINK_OK, LINK_SILENT, LINK_NOADDR, LINK_NOCARRIER, LINK_UNKNOWN };
+enum { WD_NONE, WD_REASSOC, WD_RECONNECT, WD_RESTART };
+
+#define WD_PROBE_S   30
+#define WD_GRACE_S   180
+#define WD_SETTLE_S  600
+#define WD_GAP_MAX_S 3600
+
+struct linkwd {
+    long off_since;   /* start of the current outage; -1 none */
+    long bad_since;   /* start of the run the next step waits on; -1 none */
+    long good_since;  /* start of the current run of answers; -1 none */
+    long last_act;    /* the last step taken; -1 none since the reset */
+    int  steps;       /* steps taken since the ladder last reset */
+};
+
+static void linkwd_init(struct linkwd *w)
+{
+    w->off_since = w->bad_since = w->good_since = w->last_act = -1;
+    w->steps = 0;
+}
+
+/* The least time from a step to the next, once `steps` have been taken. */
+static long linkwd_gap(int steps)
+{
+    long gap = WD_GRACE_S;
+    for (int i = 3; i < steps && gap < WD_GAP_MAX_S; i++)
+        gap *= 2;
+    return gap < WD_GAP_MAX_S ? gap : WD_GAP_MAX_S;
+}
+
+/* One observation of the link at `now`; returns the step to take, if any. */
+static int linkwd_step(struct linkwd *w, long now, int link)
+{
+    if (link == LINK_OK) {
+        w->off_since = w->bad_since = -1;
+        if (w->good_since < 0)
+            w->good_since = now;
+        if (w->steps && now - w->good_since >= WD_SETTLE_S) {
+            w->steps = 0;
+            w->last_act = -1;
+        }
+        return WD_NONE;
+    }
+    w->good_since = -1;
+    if (link != LINK_SILENT && link != LINK_NOADDR && link != LINK_NOCARRIER) {
+        w->off_since = w->bad_since = -1;
+        return WD_NONE;
+    }
+    if (w->off_since < 0)
+        w->off_since = now;
+    if (w->bad_since < 0)
+        w->bad_since = now;
+    if (now - w->bad_since < WD_GRACE_S)
+        return WD_NONE;
+    if (w->last_act >= 0 && now - w->last_act < linkwd_gap(w->steps))
+        return WD_NONE;
+    int act = w->steps == 0 ? WD_REASSOC
+            : w->steps == 1 ? WD_RECONNECT : WD_RESTART;
+    if (link == LINK_NOCARRIER)
+        act = WD_RESTART;
+    w->steps++;
+    w->last_act = now;
+    w->bad_since = now;        /* each step gets a full grace to work */
+    return act;
+}
+
+static const char *const wd_step_name[] = { "none", "reassociate",
+                                            "reconnect", "restart" };
+
+/* Does the gateway answer ARP on wlan0: 1 yes, 0 no, -1 could not ask this
+ * time, -2 cannot ask at all (no arping applet, or no busybox).
+ *
+ * busybox arping exits 0 on a reply, 1 on none and 2 on an error of its own,
+ * such as no interface (measured against busybox 1.37.0's); a failed exec is
+ * 127, from spawn() or from busybox itself. Only 1 is a "no". Up to three
+ * requests over three seconds, stopping at the first reply, so a healthy link
+ * pays one frame each way per probe. */
+static int gateway_answers(const char *bb, const char *gw)
+{
+    char *argv[] = { (char *)bb, "arping", "-q", "-f", "-c", "3", "-w", "3",
+                     "-I", "wlan0", (char *)gw, NULL };
+    int st = run_wait(argv);
+    if (st < 0 || !WIFEXITED(st))
+        return -1;
+    switch (WEXITSTATUS(st)) {
+    case 0:   return 1;
+    case 1:   return 0;
+    case 127: return -2;
+    default:  return -1;
+    }
+}
+
+static unsigned long long read_counter(const char *path)
+{
+    char b[32] = {0};
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return 0;
+    ssize_t n = read(fd, b, sizeof b - 1);
+    close(fd);
+    return n > 0 ? strtoull(b, NULL, 10) : 0;
+}
+
+/* Ends a child and reaps it, SIGKILL after 5s. Left set when even that does
+ * not reap it (a supplicant stuck in the driver), so no second one is started
+ * beside it; the reaper at the top of the loop clears it if it ever exits. */
+static void stop_child(pid_t *pid)
+{
+    kill(*pid, SIGTERM);
+    for (int i = 0; i < 100; i++) {
+        if (i == 50)
+            kill(*pid, SIGKILL);
+        pid_t r = waitpid(*pid, NULL, WNOHANG);
+        if (r == *pid || (r < 0 && errno == ECHILD)) {
+            *pid = -1;
+            return;
+        }
+        usleep(100000);
+    }
+    netlog("pid %d still running after SIGKILL\n", (int)*pid);
+}
+
 static void net_main(void)
 {
     /* FireOS 6 moved the combo-chip tools under /system/vendor and renamed
@@ -2164,6 +2373,15 @@ static void net_main(void)
      * exist and are not working, which is a fault worth showing. Waiting with
      * NO conf is not a fault and never turns it red -- see below. */
     int nocarrier = 0, said_fail = 0, said_noconf = 0;
+    /* The link watchdog; see linkwd_step. */
+    char *wpa_disconnect[] = { reassoc[0], pflag, "-iwlan0", "disconnect", NULL };
+    char *wpa_reconnect[]  = { reassoc[0], pflag, "-iwlan0", "reconnect", NULL };
+    char *wpa_status[]     = { reassoc[0], pflag, "-iwlan0", "status", NULL };
+    struct linkwd wd;
+    linkwd_init(&wd);
+    long next_probe = 0;
+    int no_arping = 0, had_carrier = 0, had_ip = 0, silent = 0;
+    char gw[32] = "";
 
     for (;;) {
         pid_t d;
@@ -2173,6 +2391,8 @@ static void net_main(void)
             else if (d == dhc)   dhc = -1;
             else if (d == ntp)   ntp = netup ? spawn(ntpd) : -1;
         }
+        long now = mono_s();
+        int link = -1;                  /* this turn's observation, if any */
 
         /* The controller removed the mark: the trial passed. Up here because
          * the branches below `continue`, and this must run every turn. */
@@ -2198,6 +2418,7 @@ static void net_main(void)
                        EMOS_WPA_CONF, ANDROID_WPA_CONF);
             }
             bootstep = 10; led_step();
+            linkwd_step(&wd, now, LINK_UNKNOWN);
             sleep(5);
             continue;
         }
@@ -2234,9 +2455,16 @@ static void net_main(void)
                        WIFI_FAIL_TURNS * 5, conf);
                 led_fail();
             }
+            if (netup) {
+                if (had_carrier)
+                    netlog("link lost: no carrier\n");
+                link = LINK_NOCARRIER;
+            }
+            had_carrier = had_ip = 0;
         } else {
             nudges = 0;
             nocarrier = 0;
+            had_carrier = 1;
             if (dhc < 0) {
                 dhc = spawn(dhcp);
                 dry = 0;
@@ -2276,9 +2504,74 @@ static void net_main(void)
                     write_resolv_conf();
                     ntp = spawn(ntpd);
                 }
-            } else if (++dry >= 4) {
-                kill(dhc, SIGTERM);
-                dry = 0;
+                had_ip = 1;
+                if (now >= next_probe) {
+                    next_probe = now + WD_PROBE_S;
+                    gw[0] = 0;
+                    int a = no_arping
+                         || default_gateway(ROUTES, "wlan0", gw, sizeof gw)
+                          ? -1 : gateway_answers(bbp, gw);
+                    if (a == -2) {
+                        no_arping = 1;
+                        netlog("link watchdog: no arping in %s, the gateway "
+                               "cannot be asked\n", bbp);
+                    }
+                    link = a == 1 ? LINK_OK : a == 0 ? LINK_SILENT
+                                                     : LINK_UNKNOWN;
+                }
+            } else {
+                if (++dry >= 4) {
+                    kill(dhc, SIGTERM);
+                    dry = 0;
+                }
+                if (netup) {
+                    if (had_ip)
+                        netlog("link lost: no address\n");
+                    link = LINK_NOADDR;
+                }
+                had_ip = 0;
+            }
+        }
+
+        if (link >= 0) {
+            if (link == LINK_SILENT && !silent)
+                netlog("link watchdog: gateway %s did not answer ARP, "
+                       "rx_packets %llu\n", gw, read_counter(
+                           "/sys/class/net/wlan0/statistics/rx_packets"));
+            silent = link == LINK_SILENT;
+            if (link == LINK_OK && wd.off_since >= 0)
+                netlog("link watchdog: gateway %s answering again after "
+                       "%lds off the network\n", gw, now - wd.off_since);
+            int act = linkwd_step(&wd, now, link);
+            if (act != WD_NONE) {
+                netlog("link watchdog: off the network %lds, rx_packets %llu, "
+                       "step %d: %s\n", now - wd.off_since,
+                       read_counter("/sys/class/net/wlan0/statistics/rx_packets"),
+                       wd.steps, wd_step_name[act]);
+                run_wait(wpa_status);           /* its answer lands in the log */
+                switch (act) {
+                case WD_REASSOC:
+                    run_wait(reassoc);
+                    break;
+                case WD_RECONNECT:
+                    run_wait(wpa_disconnect);
+                    sleep(2);
+                    run_wait(wpa_reconnect);
+                    break;
+                case WD_RESTART:
+                    /* The loop starts a new supplicant next turn, and a new
+                     * udhcpc once there is carrier, for a fresh lease and
+                     * default route: the bounce takes the route with it. */
+                    if (dhc > 0)
+                        kill(dhc, SIGTERM);
+                    if (wpa > 0)
+                        stop_child(&wpa);
+                    ifdown("wlan0");
+                    sleep(1);
+                    netlog("link watchdog: wlan0 bounced, up rc=%d\n",
+                           ifup("wlan0"));
+                    break;
+                }
             }
         }
         sleep(5);

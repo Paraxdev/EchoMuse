@@ -120,12 +120,14 @@ readelf -h busybox | grep -q "Machine:.*ARM" || {
     echo "busybox is not an ARM binary -- refusing" >&2; exit 1; }
 
 # The applets emOS actually invokes, as opposed to the ones it merely offers.
-# init.c needs the first four to bring up the network and the log; em-wifi
-# needs the rest, and a missing one there reads as "no networks found" on a
-# device whose radio is fine.
+# init.c needs the first four to bring up the network and the log, and arping
+# for its link watchdog (without it the gateway is never asked, and a link
+# that keeps carrier and address while carrying nothing goes unnoticed);
+# em-wifi needs the rest, and a missing one there reads as "no networks
+# found" on a device whose radio is fine.
 ./busybox --list > /tmp/bb-applets
-for a in udhcpc ntpd syslogd klogd ifconfig route ip awk sed cut head sort \
-         pgrep killall vi tail less find grep; do
+for a in udhcpc ntpd syslogd klogd arping ifconfig route ip awk sed cut head \
+         sort pgrep killall vi tail less find grep; do
     grep -qx "$a" /tmp/bb-applets || {
         echo "applet $a is missing -- refusing" >&2; exit 1; }
 done
