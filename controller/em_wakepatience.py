@@ -149,8 +149,8 @@ class Run:
     def report(self, now: float) -> str | None:
         """
         The log line for a run the last feed ended short, or None. Rate
-        limited to one per REPORT_EVERY_S, and a line counts the short runs
-        held back since the one before it, so none goes unaccounted.
+        limited to one per REPORT_EVERY_S; each line counts the short runs
+        held back since the one before it.
         """
         if self.short is None:
             return None
