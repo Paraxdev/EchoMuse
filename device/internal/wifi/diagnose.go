@@ -201,18 +201,22 @@ func supplicantReason(log string) string {
 	var tempDisabled, rejected string
 	notFound := 0
 	for _, line := range strings.Split(log, "\n") {
-		switch {
-		case strings.Contains(line, "CTRL-EVENT-SSID-TEMP-DISABLED"):
+		name, rest, ok := ctrlEvent(line)
+		if !ok {
+			continue
+		}
+		switch name {
+		case "CTRL-EVENT-SSID-TEMP-DISABLED":
 			// reason= is the last field; LastIndex because the quoted SSID
 			// before it may contain the same text.
-			if i := strings.LastIndex(line, " reason="); i >= 0 {
-				tempDisabled = firstField(line[i+len(" reason="):])
+			if i := strings.LastIndex(rest, " reason="); i >= 0 {
+				tempDisabled = firstField(rest[i+len(" reason="):])
 			}
-		case strings.Contains(line, "CTRL-EVENT-ASSOC-REJECT"):
-			if i := strings.Index(line, " status_code="); i >= 0 {
-				rejected = firstField(line[i+len(" status_code="):])
+		case "CTRL-EVENT-ASSOC-REJECT":
+			if i := strings.Index(rest, " status_code="); i >= 0 {
+				rejected = firstField(rest[i+len(" status_code="):])
 			}
-		case strings.Contains(line, "CTRL-EVENT-NETWORK-NOT-FOUND"):
+		case "CTRL-EVENT-NETWORK-NOT-FOUND":
 			notFound++
 		}
 	}
@@ -227,6 +231,31 @@ func supplicantReason(log string) string {
 		return "that it never found the network in its own scans"
 	}
 	return ""
+}
+
+// ctrlEvent splits a line that IS a control event: the event name first,
+// after at most an interface ("wlan0:") and a timestamp ("1234.567890:").
+// Anywhere else on a line it is somebody's text, such as an SSID quoted in
+// "Trying to associate with ... (SSID='...')", and an SSID can say anything.
+func ctrlEvent(line string) (name, rest string, ok bool) {
+	i := strings.Index(line, "CTRL-EVENT-")
+	if i < 0 {
+		return "", "", false
+	}
+	prefix := strings.Fields(line[:i])
+	if len(prefix) > 2 || (len(line[:i]) > 0 && !strings.HasSuffix(line[:i], " ")) {
+		return "", "", false
+	}
+	for _, p := range prefix {
+		if !strings.HasSuffix(p, ":") {
+			return "", "", false
+		}
+	}
+	ev := line[i:]
+	if j := strings.IndexAny(ev, " \t\r"); j >= 0 {
+		return ev[:j], ev[j:], true
+	}
+	return ev, "", true
 }
 
 func firstField(s string) string {

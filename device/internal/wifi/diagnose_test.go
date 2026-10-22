@@ -329,6 +329,14 @@ func TestSupplicantReasonFromHostapEvents(t *testing.T) {
 			"that the AP rejected the association (status 17)"},
 		{"wlan0: CTRL-EVENT-NETWORK-NOT-FOUND \nwlan0: CTRL-EVENT-NETWORK-NOT-FOUND \n",
 			"that it never found the network in its own scans"},
+		// With -t the supplicant stamps each line first.
+		{"1700000000.123456: wlan0: CTRL-EVENT-ASSOC-REJECT bssid=11:22:33:44:55:66 status_code=1\n",
+			"that the AP rejected the association (status 1)"},
+		// An SSID is anyone's text, and the supplicant quotes it on lines of
+		// its own: an event name inside one is not an event.
+		{"wlan0: Trying to associate with 11:22:33:44:55:66 (SSID='CTRL-EVENT-NETWORK-NOT-FOUND' freq=2412 MHz)\n" +
+			"wlan0: SME: Trying to authenticate with 11:22:33:44:55:66 (SSID='x: CTRL-EVENT-ASSOC-REJECT status_code=9' freq=2412 MHz)\n",
+			""},
 		// The most specific wins, whatever the order.
 		{"wlan0: CTRL-EVENT-NETWORK-NOT-FOUND \n" +
 			"wlan0: CTRL-EVENT-ASSOC-REJECT bssid=11:22:33:44:55:66 status_code=1\n" +
