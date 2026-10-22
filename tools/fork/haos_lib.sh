@@ -176,9 +176,13 @@ hash_tree() {
     (cd "$1" && find . -type f -exec $_h {} +) | sort -k2
 }
 
+boot_id() { cat /proc/sys/kernel/random/boot_id 2>/dev/null || true; }
+
 # One changing run at a time. pve.sh prints a run's output only when it
 # ends, and interrupting pve.sh leaves the run going in the VM, so a second
 # run started meanwhile would stop, copy and start the same apps at once.
+# The lock records the boot as well as the pid: after a reboot mid-run the
+# pid can belong to some daemon, and the lock would otherwise never clear.
 take_lock() {
     mkdir -p "$WORK"
     if ! mkdir "$WORK/lock" 2>/dev/null; then
@@ -188,13 +192,19 @@ take_lock() {
             sleep 1
             _p=$(cat "$WORK/lock/pid" 2>/dev/null || true)
         fi
-        if [ -n "$_p" ] && kill -0 "$_p" 2>/dev/null; then
+        _b=$(cat "$WORK/lock/boot" 2>/dev/null || true)
+        if [ -n "$_p" ] && [ "$_b" = "$(boot_id)" ] && kill -0 "$_p" 2>/dev/null; then
             die "another tools/fork script (pid $_p) is still running in this VM, probably one whose pve.sh was interrupted. Wait for it to end ('qm guest exec-status <vmid> $_p' on the Proxmox host shows whether it has), then run this again."
         fi
-        warn "removing the lock left by pid ${_p:-unknown}, which is no longer running"
+        if [ "$_b" = "$(boot_id)" ]; then
+            warn "removing the lock left by pid ${_p:-unknown}, which is no longer running"
+        else
+            warn "removing the lock left by pid ${_p:-unknown} before the VM last started"
+        fi
         rm -rf "$WORK/lock"
         mkdir "$WORK/lock" || die "cannot create $WORK/lock"
     fi
+    boot_id >"$WORK/lock/boot"
     echo "$$" >"$WORK/lock/pid"
     LOCKED=1
 }

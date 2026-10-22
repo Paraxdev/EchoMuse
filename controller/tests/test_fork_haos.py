@@ -261,13 +261,26 @@ def _dead_pid():
     return p.pid
 
 
+def _boot_id():
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except OSError:
+        return ""
+
+
+def _hold_lock(sim, pid, boot):
+    lock = sim.work / "lock"
+    lock.mkdir(parents=True, exist_ok=True)
+    (lock / "boot").write_text(f"{boot}\n" if boot else "")
+    (lock / "pid").write_text(f"{pid}\n")
+    return lock
+
+
 def test_a_second_run_waits_for_the_first_to_end(deployed):
     """pve.sh shows a run's output only at its end and interrupting it
     leaves the run going in the VM, so a second run must not act beside it."""
     sim = deployed
-    lock = sim.work / "lock"
-    lock.mkdir(parents=True)
-    (lock / "pid").write_text(f"{os.getpid()}\n")
+    lock = _hold_lock(sim, os.getpid(), _boot_id())
 
     for script in ("migrate", "rollback"):
         p = pve(sim, script, check=False)
@@ -278,9 +291,22 @@ def test_a_second_run_waits_for_the_first_to_end(deployed):
     assert backups(sim) == []
     assert (lock / "pid").read_text().strip() == str(os.getpid()), "another run's lock is left alone"
 
-    (lock / "pid").write_text(f"{_dead_pid()}\n")
+    _hold_lock(sim, _dead_pid(), _boot_id())
     p = pve(sim, "migrate")
     assert "no longer running" in p.stderr
+    assert sim.app(ff.FORK)["state"] == "started"
+    assert not lock.exists()
+
+
+def test_a_lock_from_before_a_reboot_does_not_block(deployed):
+    """After a reboot the pid in the lock may be any process, so a lock
+    written in another boot is stale whatever that pid is now."""
+    if not _boot_id():
+        pytest.skip("no kernel boot id on this host")
+    sim = deployed
+    lock = _hold_lock(sim, os.getpid(), "00000000-0000-0000-0000-000000000000")
+    p = pve(sim, "migrate")
+    assert "before the VM last started" in p.stderr
     assert sim.app(ff.FORK)["state"] == "started"
     assert not lock.exists()
 
