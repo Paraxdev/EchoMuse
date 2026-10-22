@@ -2197,6 +2197,9 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
 # (_dismiss_by_speech), or HA cancelling a still-RUNNING timer before it fires.
 
 async def start_timer_alarm(device: Device) -> None:
+    if em_state.devices.get(device.device_id) is not device:
+        log.info(f"[{device.device_id}] Timer alarm due on a dropped link: it rings if the Echo is back within the grace")
+        return
     if device.timer_alarm_task is not None and not device.timer_alarm_task.done():
         return  # already ringing (a second timer finished) — one ring is enough
     log.info(f"[{device.device_id}] Timer alarm — ringing")
