@@ -54,6 +54,17 @@ with Bluetooth, **stop any BLE scan while the link carries a turn, a reply or
 a shell session** — on the Dot a running scan made the AP resend 47-150% of
 frames (see "The LE scan costs the WiFi link" in `device/CLAUDE.md`).
 
+**A programmatic `/shell` session is a pipe** (`shell_open` without `pty`):
+write each binary message's bytes into a POSIX `sh`'s stdin verbatim and in
+order, whatever its size (the controller sends up to 32 KiB per message), with
+no line or read limit, and send back everything the shell prints, stdout and
+stderr together. The controller moves files over it as base64 heredocs in
+blocks of about 512 KiB, each answered by the shell, and checks the md5 before
+anything replaces a file. When a session drops part-way through, the controller
+sends `shell_open` again while the old session may still be open, and the
+device must replace the old session with the new one; the transfer then carries
+on from the last answered block.
+
 ## Registration and capabilities
 
 Immediately after the `/control` socket opens, the device sends one `register`

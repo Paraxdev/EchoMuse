@@ -92,6 +92,42 @@ def test_limit_unsent_never_raises():
     assert em_tcp.limit_unsent(s) is False
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux socket option")
+def test_programmatic_shell_sessions_cap_unsent_data(accepted):
+    """em_shell applies it to the socket of every programmatic session it
+    opens, which is where the bulk transfers run."""
+    import asyncio
+    import em_shell
+    import em_state
+
+    class Transport:
+        def get_extra_info(self, name):
+            return accepted if name == "socket" else None
+
+    class WS:
+        transport = Transport()
+
+        async def close(self):
+            pass
+
+    class Live:
+        device_id = "tcp-dev"
+
+        async def send_control(self, msg):
+            if msg["type"] == "shell_open":
+                em_state.shell_pending[self.device_id].set_result(WS())
+
+    async def main():
+        live = Live()
+        await em_shell.get_ws(live)
+        await em_shell.release_ws(live.device_id, live)
+
+    asyncio.run(main())
+    em_shell.locks.pop("tcp-dev", None)
+    assert accepted.getsockopt(socket.IPPROTO_TCP, em_tcp.TCP_NOTSENT_LOWAT) \
+        == em_tcp.BULK_UNSENT_BYTES
+
+
 def test_every_device_plane_is_tuned():
     # All three planes (/control, /data, /shell) arrive through _route, so
     # that is where the call must sit, ahead of the dispatch.
