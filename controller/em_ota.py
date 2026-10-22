@@ -193,7 +193,8 @@ async def run_update(device_id: str, release: dict,
             await _update_failed(
                 device_id,
                 f"Update abandoned after {MAX_HOLD_S:.0f}s so the queue "
-                f"could continue — the device may still be mid-update",
+                f"could continue; it stopped before the slot flip, so the "
+                f"device still runs its current firmware",
             )
             return
         if staged is not None:
