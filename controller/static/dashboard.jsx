@@ -669,6 +669,8 @@ function Select({ label, sub, value, options, onChange, disabled = false }) {
       <div style={{ marginBottom: 'var(--space-3)', minWidth: 0 }}>
         <span className="em-field__label">{label}</span>
       </div>
+      {/* A label may wrap inside its pill (.em-pill is nowrap): three options
+          in a phone-width column otherwise ran past the screen. */}
       <div role="radiogroup" aria-label={typeof label === 'string' ? label : undefined}
         style={{ display: 'flex', gap: 'var(--space-3)', minWidth: 0 }}>
         {options.map(o => (
@@ -677,7 +679,7 @@ function Select({ label, sub, value, options, onChange, disabled = false }) {
             role="radio" aria-checked={o.value === value}
             className={'em-pill em-pill--small' + (o.value === value ? ' em-pill--accent' : '')}
             disabled={disabled || !!o.disabled}
-            style={{ flex: 1, minWidth: 0 }}
+            style={{ flex: 1, minWidth: 0, whiteSpace: 'normal' }}
             onClick={() => { if (!(disabled || o.disabled)) onChange(o.value); }}>
             {o.label}
           </button>
@@ -1338,8 +1340,8 @@ function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMis
                     }}/>
                   ))}
                 </div>
-                <span style={{ fontFamily: mono, fontSize: 'var(--fs-xs)', color: 'var(--text2)', width: 34, flexShrink: 0 }}>{fmtS(seg.shown)}</span>
-                <span style={{ fontFamily: mono, fontSize: 'var(--fs-2xs)', textTransform: 'uppercase', letterSpacing: 'var(--tracking-label)', width: '18ch', whiteSpace: 'nowrap', flexShrink: 0, color: failed ? 'var(--warn)' : 'var(--ok)' }}>
+                <span style={{ fontFamily: mono, fontSize: 'var(--fs-xs)', color: 'var(--text2)', width: '6ch', flexShrink: 0 }}>{fmtS(seg.shown)}</span>
+                <span style={{ fontFamily: mono, fontSize: 'var(--fs-2xs)', textTransform: 'uppercase', letterSpacing: 'var(--tracking-label)', width: '20ch', whiteSpace: 'nowrap', flexShrink: 0, color: failed ? 'var(--warn)' : 'var(--ok)' }}>
                   {t.outcome === 'ok' ? 'ok' : (t.outcome || '?').replace(/_/g, ' ')}
                 </span>
                 {/* Saved utterance: listen in place, or download the WAV.
@@ -2026,7 +2028,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
       {/* Fixed height (not maxHeight): every tab renders in an identical
           frame — content scrolls inside, the window never resizes as you
           move between tabs. */}
-      <div className="em-modal" style={{ width: 'min(900px,95vw)', height: 'min(700px,90vh)', background: 'linear-gradient(170deg,var(--raised),var(--surface))', border: '1px solid var(--border)', borderRadius: 'var(--radius-dialog)', boxShadow: '0 24px 80px rgba(0,0,0,0.3),0 2px 0 var(--sheen) inset', display: 'flex', flexDirection: 'column', overflow: 'hidden', animation: 'fadeIn 0.15s ease' }}>
+      <div className="em-modal" style={{ width: 'min(1120px,96vw)', height: 'min(880px,92vh)', background: 'linear-gradient(170deg,var(--raised),var(--surface))', border: '1px solid var(--border)', borderRadius: 'var(--radius-dialog)', boxShadow: '0 24px 80px rgba(0,0,0,0.3),0 2px 0 var(--sheen) inset', display: 'flex', flexDirection: 'column', overflow: 'hidden', animation: 'fadeIn 0.15s ease' }}>
         {/* Header */}
         <div className="em-modal-head" style={{ background: 'linear-gradient(180deg,var(--card),var(--bg))', borderBottom: '1px solid var(--border-hard)', padding: 'var(--space-10) var(--space-12) 0', boxShadow: '0 1px 0 var(--sheen) inset' }}>
           <div className="em-modal-headrow" style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-10)', marginBottom: 'var(--space-8)' }}>
@@ -10813,7 +10815,7 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
       onClick={e => e.target === e.currentTarget && onClose()}>
       {/* Same fixed frame as the device Detail modal — consistent window
           size across the whole dashboard. */}
-      <div className="em-modal" style={{ width:'min(900px,95vw)', height:'min(700px,90vh)', background:'linear-gradient(170deg,var(--raised),var(--surface))', border:'1px solid var(--border)', borderRadius:'var(--radius-dialog)', boxShadow:'0 24px 80px rgba(0,0,0,0.3),0 2px 0 var(--sheen) inset', display:'flex', flexDirection:'column', overflow:'hidden', animation:'fadeIn 0.15s ease' }}>
+      <div className="em-modal" style={{ width:'min(1120px,96vw)', height:'min(880px,92vh)', background:'linear-gradient(170deg,var(--raised),var(--surface))', border:'1px solid var(--border)', borderRadius:'var(--radius-dialog)', boxShadow:'0 24px 80px rgba(0,0,0,0.3),0 2px 0 var(--sheen) inset', display:'flex', flexDirection:'column', overflow:'hidden', animation:'fadeIn 0.15s ease' }}>
 
         {/* Header */}
         <div className="em-modal-head" style={{ background:'linear-gradient(180deg,var(--card),var(--bg))', borderBottom:'1px solid var(--border-hard)', padding:'var(--space-10) var(--space-12) 0', boxShadow:'0 1px 0 var(--sheen) inset' }}>
