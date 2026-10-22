@@ -113,6 +113,45 @@ def test_an_exception_without_frames_degrades_instead_of_raising():
     assert wsc.from_exception(_Exc()) == (None, None, None, None)
 
 
+class _Protocol:
+    def __init__(self, sent=None, rcvd=None):
+        self.close_sent = sent
+        self.close_rcvd = rcvd
+
+
+class _Conn:
+    def __init__(self, protocol):
+        self.protocol = protocol
+
+
+def test_the_frames_are_read_off_a_connection_that_closed_quietly():
+    """
+    `async for` over a websockets connection returns, raising nothing, on a
+    normal close, so a handler that wants the reason after the loop has only
+    the connection to ask.
+    """
+    parts = wsc.from_connection(
+        _Conn(_Protocol(sent=_Close(1000, "bye"), rcvd=_Close(1000, "bye"))))
+    assert parts == (1000, "bye", 1000, "bye")
+    assert wsc.is_routine(parts[0], parts[2])
+
+
+def test_a_connection_still_open_reads_as_no_frame_either_way():
+    """A handler that failed on an open socket: nothing was said by anyone."""
+    assert wsc.from_connection(_Conn(_Protocol())) == (None, None, None, None)
+    assert wsc.from_connection(object()) == (None, None, None, None)
+    assert "no close frame" in wsc.describe(*wsc.from_connection(object()))
+
+
+def test_the_connection_attributes_are_the_real_library_s():
+    """Duck typing against names websockets actually has, checked on its own."""
+    from websockets.protocol import Protocol, Side
+    proto = Protocol(Side.SERVER)
+    assert proto.close_sent is None and proto.close_rcvd is None
+    proto.send_close(1011, "keepalive ping timeout")
+    assert wsc.from_connection(_Conn(proto)) == (1011, "keepalive ping timeout", None, None)
+
+
 def test_an_unknown_code_is_rendered_not_guessed():
     out = wsc.describe(4999, "custom", None, None)
     assert "4999" in out and "unknown" in out

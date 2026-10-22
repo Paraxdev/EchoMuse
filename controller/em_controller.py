@@ -5587,9 +5587,8 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                 )
             else:
                 log.info(f"[control] Device disconnected: {device.device_id}")
-                em_dbwriter.submit(db.log_device,
-                    device.device_id, "info", "controller", "Disconnected"
-                )
+                why = em_device_view.note_disconnect(device.device_id, em_wsclose.from_connection(ws))
+                em_dbwriter.submit(db.log_device, device.device_id, "info", "controller", f"Disconnected: {why}")
                 # Stamp the moment it went away, so "last seen" is exact for
                 # an offline device rather than up to one stats report stale.
                 em_dbwriter.submit(db.touch_device_seen, device.device_id)

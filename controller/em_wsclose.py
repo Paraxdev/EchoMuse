@@ -107,8 +107,22 @@ def from_exception(exc) -> tuple:
     Everything is fetched defensively so a library change degrades to a
     vaguer log line instead of raising inside an exception handler.
     """
-    sent = getattr(exc, "sent", None)
-    rcvd = getattr(exc, "rcvd", None)
+    return _parts(getattr(exc, "sent", None), getattr(exc, "rcvd", None))
+
+
+def from_connection(ws) -> tuple:
+    """
+    The same four values read off a websockets connection, for a handler that
+    ends without the exception: `async for` over a connection returns quietly
+    on a normal close. A connection that has not closed yet (the handler
+    failed on an open socket) reads as no frame either way.
+    """
+    proto = getattr(ws, "protocol", None)
+    return _parts(getattr(proto, "close_sent", None),
+                  getattr(proto, "close_rcvd", None))
+
+
+def _parts(sent, rcvd) -> tuple:
     return (
         getattr(sent, "code", None), getattr(sent, "reason", None),
         getattr(rcvd, "code", None), getattr(rcvd, "reason", None),
