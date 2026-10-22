@@ -134,7 +134,7 @@ func TestSSIDLineQuotesWhatItCanAndHexesTheRest(t *testing.T) {
 
 func TestComposeConfWritesTheSSIDAndPassphraseVerbatim(t *testing.T) {
 	onBase(t, "emos", "", "ctrl_interface="+emosDir+"\n")
-	conf := composeConf([]byte(`Bob's "Home"`), `pa"ss\word`)
+	conf := composeConf([]byte(`Bob's "Home"`), `pa"ss\word`, false)
 	if !strings.Contains(conf, "\tssid=\"Bob's \"Home\"\"\n") {
 		t.Errorf("SSID not written verbatim:\n%s", conf)
 	}
@@ -143,7 +143,7 @@ func TestComposeConfWritesTheSSIDAndPassphraseVerbatim(t *testing.T) {
 	if !strings.Contains(conf, "\tpsk=\"pa\"ss\\word\"\n") {
 		t.Errorf("passphrase not written verbatim:\n%s", conf)
 	}
-	conf = composeConf([]byte("net"), strings.Repeat("AB", 32))
+	conf = composeConf([]byte("net"), strings.Repeat("AB", 32), false)
 	if !strings.Contains(conf, "\tpsk="+strings.Repeat("ab", 32)+"\n") {
 		t.Errorf("a 64-hex PSK must be written bare:\n%s", conf)
 	}

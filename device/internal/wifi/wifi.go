@@ -125,6 +125,13 @@ type Network struct {
 	SSID    string `json:"ssid"`
 	SSIDHex string `json:"ssid_hex"`
 	Signal  int    `json:"signal"`
+	// Freqs is every frequency the name was seen on, in MHz, ascending: one
+	// SSID often spans both bands and several APs, and which band a network
+	// is on is the first question when this radio will not join it.
+	Freqs []int `json:"freqs,omitempty"`
+	// Flags are the strongest BSS's security flags exactly as the supplicant
+	// prints them, e.g. [WPA2-PSK+SAE-CCMP][ESS] (see securityOf).
+	Flags string `json:"flags,omitempty"`
 }
 
 type marker struct {
@@ -154,7 +161,23 @@ var (
 	// is not root and cannot hand a file to AID_WIFI, and the uid it asks for
 	// is the whole assertion.
 	chownFile = os.Chown
+	// The supplicant, the process table, the clock and emOS's network log,
+	// indirected so a change's diagnosis and its nudge run off-target.
+	wpaCliExec = func(args []string) (string, error) {
+		out, err := exec.Command("wpa_cli", args...).CombinedOutput()
+		return string(out), err
+	}
+	procDir = "/proc"
+	sleep   = time.Sleep
+	netLogP = netLog
 )
+
+// netLog is where emOS's init sends the supplicant's stdout (NETLOG in
+// emos/init/init.c, pinned by test). FireOS has no such file.
+const netLog = "/run/net.log"
+
+// scanSettle is how long a scan is given before its results are read.
+const scanSettle = 4 * time.Second
 
 func onEmOS() bool { return baseOS() == platform.EmOS }
 
@@ -231,9 +254,7 @@ func sockDir() string {
 // ─── Queries ──────────────────────────────────────────────────────────────────
 
 func wpaCli(args ...string) (string, error) {
-	full := append([]string{"-p", sockDir(), "-i", iface}, args...)
-	out, err := exec.Command("wpa_cli", full...).CombinedOutput()
-	return string(out), err
+	return wpaCliExec(append([]string{"-p", sockDir(), "-i", iface}, args...))
 }
 
 // CurrentSSID returns the associated SSID for display, or "" when not
@@ -285,20 +306,32 @@ func Scan() ([]Network, error) {
 	if _, err := wpaCli("scan"); err != nil {
 		return nil, fmt.Errorf("scan trigger: %w", err)
 	}
-	time.Sleep(4 * time.Second)
+	return collectScan()
+}
+
+// collectScan reads the supplicant's results once a scan has had time to run,
+// and records which networks it saw for seenInLastScan.
+func collectScan() ([]Network, error) {
+	sleep(scanSettle)
 	out, err := wpaCli("scan_results")
 	if err != nil {
 		return nil, fmt.Errorf("scan_results: %w", err)
 	}
-
-	return parseScan(out), nil
+	nets := parseScan(out)
+	rememberScan(nets)
+	return nets, nil
 }
 
 // parseScan turns scan_results into one Network per SSID, strongest AP first.
 // Keyed by the SSID's BYTES, so two names that only differ in bytes a display
 // cannot show stay two networks.
 func parseScan(out string) []Network {
-	best := map[string]int{}
+	type seen struct {
+		sig   int
+		flags string
+		freqs map[int]bool
+	}
+	best := map[string]*seen{}
 	for _, line := range strings.Split(out, "\n") {
 		// bssid \t frequency \t signal \t flags \t ssid. Tabs inside an SSID
 		// arrive escaped, so the fifth field is the whole name; only a
@@ -318,17 +351,56 @@ func parseScan(out string) []Network {
 			continue
 		}
 		key := string(ssid)
-		if cur, ok := best[key]; !ok || sig > cur {
-			best[key] = sig
+		cur, ok := best[key]
+		if !ok {
+			cur = &seen{sig: sig, flags: parts[3], freqs: map[int]bool{}}
+			best[key] = cur
+		} else if sig > cur.sig {
+			cur.sig, cur.flags = sig, parts[3]
+		}
+		if f, err := strconv.Atoi(strings.TrimSpace(parts[1])); err == nil && f > 0 {
+			cur.freqs[f] = true
 		}
 	}
 	nets := make([]Network, 0, len(best))
-	for key, sig := range best {
+	for key, s := range best {
 		b := []byte(key)
-		nets = append(nets, Network{SSID: SSIDText(b), SSIDHex: hex.EncodeToString(b), Signal: sig})
+		n := Network{SSID: SSIDText(b), SSIDHex: hex.EncodeToString(b), Signal: s.sig, Flags: s.flags}
+		for f := range s.freqs {
+			n.Freqs = append(n.Freqs, f)
+		}
+		sort.Ints(n.Freqs)
+		nets = append(nets, n)
 	}
 	sort.Slice(nets, func(i, j int) bool { return nets[i].Signal > nets[j].Signal })
 	return nets
+}
+
+var (
+	scanMu sync.Mutex
+	// lastScan holds the SSID bytes the most recent scan saw; nil before the
+	// first since this process started.
+	lastScan map[string]bool
+)
+
+func rememberScan(nets []Network) {
+	m := make(map[string]bool, len(nets))
+	for _, n := range nets {
+		if b, err := hex.DecodeString(n.SSIDHex); err == nil {
+			m[string(b)] = true
+		}
+	}
+	scanMu.Lock()
+	lastScan = m
+	scanMu.Unlock()
+}
+
+// seenInLastScan reports whether the device's own last scan saw ssid. False
+// when there has been no scan since start, which is when it knows least.
+func seenInLastScan(ssid []byte) bool {
+	scanMu.Lock()
+	defer scanMu.Unlock()
+	return lastScan[string(ssid)]
 }
 
 // ─── Change with rollback ─────────────────────────────────────────────────────
@@ -355,10 +427,18 @@ func getprop(key, fallback string) string {
 // built without CONFIG_WPS or CONFIG_P2P, so they are fields it cannot use. It
 // tolerates them by patch, but that patch is for confs FireOS 6 left behind, not
 // a licence to write dead lines.
-func composeConf(ssid []byte, psk string) string {
+//
+// probe adds scan_ssid=1, for a network the device's own last scan did not see:
+// hidden, or typed by hand. Without it the supplicant only ever listens for
+// beacons naming it, never asks by name, and sits in SCANNING for the whole
+// window. The provisioning wizard does the same in both of its flows.
+func composeConf(ssid []byte, psk string, probe bool) string {
 	network := []string{
 		"network={",
 		ssidLine(ssid),
+	}
+	if probe {
+		network = append(network, "\tscan_ssid=1")
 	}
 	if psk == "" {
 		network = append(network, "\tkey_mgmt=NONE")
@@ -520,18 +600,21 @@ func enableWifi() error {
 // init symlinks busybox into /sbin — a missing symlink would present as a WiFi
 // change that silently does nothing. "wpa_supplicant" is 14 chars against the
 // kernel's 15-char comm field, so there is no truncation to match around.
-func retireSupplicant() error {
-	entries, err := os.ReadDir("/proc")
+//
+// Returns the pids it signalled, so the caller can tell their replacement from
+// them.
+func retireSupplicant() ([]int, error) {
+	entries, err := os.ReadDir(procDir)
 	if err != nil {
-		return fmt.Errorf("read /proc: %w", err)
+		return nil, fmt.Errorf("read %s: %w", procDir, err)
 	}
-	found := 0
+	var retired []int
 	for _, e := range entries {
 		pid, err := strconv.Atoi(e.Name())
 		if err != nil {
 			continue
 		}
-		comm, err := os.ReadFile("/proc/" + e.Name() + "/comm")
+		comm, err := os.ReadFile(filepath.Join(procDir, e.Name(), "comm"))
 		if err != nil || strings.TrimSpace(string(comm)) != "wpa_supplicant" {
 			continue
 		}
@@ -539,15 +622,90 @@ func retireSupplicant() error {
 			log.Printf("[wifi] SIGTERM to supplicant pid %d: %v", pid, err)
 			continue
 		}
-		found++
+		retired = append(retired, pid)
 	}
-	if found == 0 {
+	if len(retired) == 0 {
 		// Not an error: init starts one as soon as a conf exists.
 		log.Println("[wifi] no running supplicant to retire — init will start one")
-		return nil
+		return nil, nil
 	}
-	log.Printf("[wifi] retired %d supplicant process(es) — init restarts against the new conf", found)
-	return nil
+	log.Printf("[wifi] retired %d supplicant process(es) — init restarts against the new conf", len(retired))
+	return retired, nil
+}
+
+// supplicantWait bounds nudgeNewSupplicant: init's supervision turn is 5s, so
+// the replacement is spawned within 5s and answers about a second later.
+var supplicantWait = 10 * time.Second
+
+// pollEvery is how often the nudge asks; a var so tests need not wait.
+var pollEvery = 250 * time.Millisecond
+
+// nudgeNewSupplicant sends the supplicant that replaced the retired ones a
+// `reassociate` as soon as it answers, which is the nudge emOS's init gives it
+// (net_main in emos/init/init.c) without init's timing. On this hardware the
+// supplicant does not associate on its own, and init nudges only on every
+// third 5s turn without carrier, the first in the same turn it spawns the
+// supplicant and so before its control socket exists. A change's first real
+// attempt therefore started 15-20s into its 45s window.
+//
+// A PONG counts only once every retired pid has exited: the old supplicant
+// answers until SIGTERM has taken effect, and a reassociate it swallows on its
+// way out is no nudge. Giving up changes nothing; init's own nudge follows.
+func nudgeNewSupplicant(retired []int) bool {
+	deadline := time.Now().Add(supplicantWait)
+	for {
+		if allExited(retired) {
+			if out, err := wpaCli("ping"); err == nil && hasLine(out, "PONG") {
+				out, err := wpaCli("reassociate")
+				log.Printf("[wifi] nudged the new supplicant: reassociate -> %s (err %v)",
+					strings.TrimSpace(out), err)
+				return err == nil
+			}
+		}
+		if !time.Now().Before(deadline) {
+			log.Printf("[wifi] new supplicant did not answer within %s — leaving association to init's nudge", supplicantWait)
+			return false
+		}
+		sleep(pollEvery)
+	}
+}
+
+func hasLine(out, want string) bool {
+	for _, l := range strings.Split(out, "\n") {
+		if strings.TrimSpace(l) == want {
+			return true
+		}
+	}
+	return false
+}
+
+// allExited reports whether none of pids is still a running wpa_supplicant. A
+// zombie has exited (init reaps only on its next turn), and a pid that now
+// names another program was reused.
+func allExited(pids []int) bool {
+	for _, pid := range pids {
+		comm, state, ok := procStat(pid)
+		if ok && comm == "wpa_supplicant" && state != 'Z' && state != 'X' {
+			return false
+		}
+	}
+	return true
+}
+
+// procStat reads a process's comm and state from /proc/<pid>/stat. comm sits
+// in parentheses and may itself contain ") ", so the state is found after the
+// LAST ')'.
+func procStat(pid int) (comm string, state byte, ok bool) {
+	b, err := os.ReadFile(filepath.Join(procDir, strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return "", 0, false
+	}
+	s := string(b)
+	open, closing := strings.IndexByte(s, '('), strings.LastIndexByte(s, ')')
+	if open < 0 || closing < open || closing+2 >= len(s) {
+		return "", 0, false
+	}
+	return s[open+1 : closing], s[closing+2], true
 }
 
 // reloadConf swaps in a new config and gets the supplicant onto it.
@@ -560,13 +718,19 @@ func retireSupplicant() error {
 // On emOS that dance is wrong. `svc` needs a framework and property service that
 // are absent, so the disable fails and takes the change with it — and nothing
 // else writes the file, so there is no save to lose a write to. Write, then
-// retire the supplicant for init's supervisor to replace, as em-wifi does.
+// retire the supplicant for init's supervisor to replace, as em-wifi does, and
+// nudge the replacement.
 func reloadConf(content string) error {
 	if onEmOS() {
 		if err := writeConf(content); err != nil {
 			return err
 		}
-		return retireSupplicant()
+		retired, err := retireSupplicant()
+		if err != nil {
+			return err
+		}
+		nudgeNewSupplicant(retired)
+		return nil
 	}
 	if err := disableWifi(); err != nil {
 		return err
@@ -730,13 +894,23 @@ func Change(ssidBytes []byte, psk string, connected func() bool) {
 		setResult(Result{OK: false, SSID: ssid, Error: reason})
 	}
 
-	if err := reloadConf(composeConf(ssidBytes, psk)); err != nil {
+	probe := !seenInLastScan(ssidBytes)
+	if probe {
+		log.Printf("[wifi] %q was not in this device's last scan — probing for it by name", ssid)
+	}
+	// Before the reload, so the supplicant's account of this attempt is
+	// everything written after it.
+	mark := markNetLog()
+	if err := reloadConf(composeConf(ssidBytes, psk, probe)); err != nil {
 		revert(err.Error())
 		return
 	}
 
 	if !waitForAssociation(ssidBytes, associateTimeout) {
-		revert(fmt.Sprintf("did not associate to %q within %s (wrong passphrase or AP out of range?)", ssid, associateTimeout))
+		// Diagnosed before the revert, while the supplicant that failed is
+		// still the one running and its log lines are the newest.
+		revert(fmt.Sprintf("did not associate to %q within %s. %s",
+			ssid, associateTimeout, diagnoseNoAssociation(ssidBytes, psk, mark)))
 		return
 	}
 	log.Printf("[wifi] associated to %q", ssid)
