@@ -21,6 +21,8 @@ want=$(sed -n 's/^version:[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' "$APP_SRC/conf
 [ -n "$want" ] || die "no version: in $APP_SRC/config.yaml"
 
 preflight
+trap release_lock EXIT
+take_lock
 local_root=$(sv_dir local) || die "no local apps folder under $EMF_MNT/supervisor (apps/local or addons/local)"
 target="$local_root/echomuse_fork"
 
@@ -67,6 +69,7 @@ else
 fi
 
 step "ha $HA_GROUP $action $FORK_SLUG: Supervisor builds the image now, which takes minutes"
+timed_out=0
 if ! out=$(ha_app "$action" "$FORK_SLUG" 2>&1); then
     say "$out"
     # The CLI gives up on a long build before Supervisor does; anything else
@@ -74,6 +77,7 @@ if ! out=$(ha_app "$action" "$FORK_SLUG" 2>&1); then
     case $out in
         *[Tt]imeout* | *deadline*)
             warn "the CLI timed out; waiting for Supervisor to finish the build"
+            timed_out=1
             ;;
         *)
             ha_cli supervisor logs 2>/dev/null | tail -n 60 >&2 || true
@@ -100,6 +104,11 @@ while :; do
 done
 
 step "Done"
+if [ "$timed_out" = 1 ]; then
+    # A rebuild keeps the version it had, and Supervisor may list an install
+    # before its image is built, so the version proves nothing here.
+    warn "the CLI gave up waiting, so the build may still be running. Before migrating, check that Settings > Apps shows no build in progress for $FORK_SLUG."
+fi
 show_app "$FORK_SLUG"
 show_app "$UPSTREAM_SLUG"
 fork_data=$(data_dir "$FORK_SLUG")

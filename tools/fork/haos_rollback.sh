@@ -32,6 +32,8 @@ while [ $# -gt 0 ]; do
 done
 
 preflight
+trap release_lock EXIT
+take_lock
 app_installed "$UPSTREAM_SLUG" \
     || die "$UPSTREAM_SLUG is not installed; give the upstream app's slug with --from"
 

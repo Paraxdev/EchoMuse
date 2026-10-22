@@ -28,6 +28,7 @@ GUEST_WORK=${EMF_GUEST_WORK:-/mnt/data/echomuse_fork}
 CHUNK=${EMF_CHUNK:-524288}
 # The clone for `deploy --git` runs in this image (git and busybox).
 ALPINE_GIT="alpine/git:2.47.2@sha256:062a01ad7a0eb17cff382bc5e26086b4d710e56dfdfdf001109a49b6d9bd378c"
+INTERRUPT_NOTE="Interrupting this does not stop it in the VM; a second run refuses while the first is still going."
 
 HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 
@@ -221,6 +222,7 @@ cmd_deploy() {
     fi
 
     say "Installing in VM $VMID (Supervisor builds the image; the output arrives when it is done)"
+    say "$INTERRUPT_NOTE"
     qga 3600 - sh "$GUEST_WORK/incoming/pkg/tools/haos_install.sh" "$GUEST_WORK/incoming/pkg"
 }
 
@@ -232,6 +234,8 @@ cmd_guest() {
     # shellcheck disable=SC2016
     qga 30 - sh -c 'test -f "$1"' sh "$GUEST_WORK/tools/$script" \
         || die "$GUEST_WORK/tools/$script is not in the VM; run 'pve.sh deploy' first"
+    say "Running $script in VM $VMID; its output arrives when it ends, which can take minutes."
+    [ "$script" = haos_status.sh ] || say "$INTERRUPT_NOTE"
     qga 3600 - sh "$GUEST_WORK/tools/$script" "$@"
 }
 

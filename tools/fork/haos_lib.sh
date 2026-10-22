@@ -176,6 +176,36 @@ hash_tree() {
     (cd "$1" && find . -type f -exec $_h {} +) | sort -k2
 }
 
+# One changing run at a time. pve.sh prints a run's output only when it
+# ends, and interrupting pve.sh leaves the run going in the VM, so a second
+# run started meanwhile would stop, copy and start the same apps at once.
+take_lock() {
+    mkdir -p "$WORK"
+    if ! mkdir "$WORK/lock" 2>/dev/null; then
+        _p=$(cat "$WORK/lock/pid" 2>/dev/null || true)
+        if [ -z "$_p" ]; then
+            # The holder may be between its mkdir and writing its pid.
+            sleep 1
+            _p=$(cat "$WORK/lock/pid" 2>/dev/null || true)
+        fi
+        if [ -n "$_p" ] && kill -0 "$_p" 2>/dev/null; then
+            die "another tools/fork script (pid $_p) is still running in this VM, probably one whose pve.sh was interrupted. Wait for it to end ('qm guest exec-status <vmid> $_p' on the Proxmox host shows whether it has), then run this again."
+        fi
+        warn "removing the lock left by pid ${_p:-unknown}, which is no longer running"
+        rm -rf "$WORK/lock"
+        mkdir "$WORK/lock" || die "cannot create $WORK/lock"
+    fi
+    echo "$$" >"$WORK/lock/pid"
+    LOCKED=1
+}
+
+release_lock() {
+    if [ "${LOCKED:-0}" = 1 ]; then
+        rm -rf "$WORK/lock"
+        LOCKED=0
+    fi
+}
+
 free_kb() { df -kP "$1" | awk 'NR == 2 { print $4 }'; }
 used_kb() { du -sk "$1" | awk '{ print $1 }'; }
 

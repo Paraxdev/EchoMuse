@@ -170,6 +170,7 @@ def test_migrate_copies_the_whole_data_folder_and_switches_the_apps(deployed):
     boots = [(h[1], h[2]["boot"]) for h in hist if h[0] == "options" and "boot" in h[2]]
     assert boots.index((ff.UPSTREAM, "manual")) < boots.index((ff.FORK, "auto"))
     assert "Check, in this order" in p.stdout
+    assert not (sim.work / "lock").exists(), "a finished run releases its lock"
 
 
 def test_migrate_refuses_while_anything_has_the_upstream_data_mounted(deployed):
@@ -239,6 +240,36 @@ def test_after_a_rollback_migrate_asks_whose_data_wins(deployed):
     assert fork_tree(sim) == upstream_tree(sim)
     assert len(backups(sim)) == 2
     assert (backups(sim)[-1] / ff.FORK / "written-by-the-fork").read_text() == "fork"
+
+
+def _dead_pid():
+    p = subprocess.Popen(["sh", "-c", "exit 0"])
+    p.wait()
+    return p.pid
+
+
+def test_a_second_run_waits_for_the_first_to_end(deployed):
+    """pve.sh shows a run's output only at its end and interrupting it
+    leaves the run going in the VM, so a second run must not act beside it."""
+    sim = deployed
+    lock = sim.work / "lock"
+    lock.mkdir(parents=True)
+    (lock / "pid").write_text(f"{os.getpid()}\n")
+
+    for script in ("migrate", "rollback"):
+        p = pve(sim, script, check=False)
+        assert p.returncode != 0, script
+        assert "still running" in p.stderr, script
+    assert sim.app(ff.UPSTREAM)["state"] == "started"
+    assert sim.app(ff.FORK)["state"] == "stopped"
+    assert backups(sim) == []
+    assert (lock / "pid").read_text().strip() == str(os.getpid()), "another run's lock is left alone"
+
+    (lock / "pid").write_text(f"{_dead_pid()}\n")
+    p = pve(sim, "migrate")
+    assert "no longer running" in p.stderr
+    assert sim.app(ff.FORK)["state"] == "started"
+    assert not lock.exists()
 
 
 def test_rollback_changes_neither_data_folder(deployed):

@@ -52,6 +52,7 @@ done
 fail_hint=""
 on_exit() {
     rc=$?
+    release_lock
     if [ "$rc" != 0 ] && [ -n "$fail_hint" ]; then
         printf '\n%s\n' "$fail_hint" >&2
     fi
@@ -59,6 +60,7 @@ on_exit() {
 trap on_exit EXIT
 
 preflight
+take_lock
 src=$(data_dir "$UPSTREAM_SLUG")
 dst=$(data_dir "$FORK_SLUG")
 

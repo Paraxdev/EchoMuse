@@ -119,7 +119,9 @@ If the build fails, the end of the Supervisor log is printed.
 sh tools/fork/pve.sh migrate
 ```
 
-In order, and each step is printed as it happens:
+In order (`pve.sh` prints the steps when the run ends, which can take a few
+minutes; interrupting `pve.sh` does not stop the run in the VM, and a second
+run refuses to start until the first has ended):
 
 1. stops `acc06409_controller-ea` and turns off its start at boot;
 2. refuses to go on while any running container still has its data folder
@@ -289,6 +291,12 @@ host" in `docs/faq.md`.
   (or the agent refused the input). Use `deploy --git URL --ref BRANCH`.
 - `still running in the VM after the timeout (pid N)`: the command goes on in
   the VM; `qm guest exec-status 100 N` shows how it ended.
+- `another tools/fork script (pid N) is still running in this VM`: an earlier
+  deploy, migrate or rollback is still going, usually one whose `pve.sh` was
+  interrupted. N is the process `qm guest exec` started, so
+  `qm guest exec-status 100 N` shows whether it has ended and what it printed.
+  Run the command again once it has. A lock whose process has gone is removed
+  by the next run.
 - `hassio_cli has no curl, jq or SUPERVISOR_TOKEN`: the scripts need those in
   that container to reach Supervisor, and stop before changing anything.
 - A migration that stops part way prints what state it left and the command
