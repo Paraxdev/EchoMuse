@@ -218,6 +218,14 @@ func describeAir(ssid []byte, psk string, nets []Network, hasReason bool) []stri
 	return out
 }
 
+// ptkRefused is what hostap 2.10's wpa_supplicant_install_ptk() prints when
+// the driver will not take the pairwise key. That happens after message 3's
+// MIC has verified, so the passphrase was right; hostap then deauthenticates
+// and reports the handshake as WRONG_KEY anyway. The MT8163 driver does this
+// while its firmware is not ready (seen with one mesh router, 2026-10), see
+// emos/tools/build-wpa-supplicant.sh.
+const ptkRefused = "WPA: Failed to set PTK to the driver"
+
 // supplicantReason picks out what the supplicant said about the attempt:
 // hostap 2.10 prints these at its default level, and emOS's init sends its
 // stdout to the network log. Nothing else on the line is used, the SSID least
@@ -225,7 +233,12 @@ func describeAir(ssid []byte, psk string, nets []Network, hasReason bool) []stri
 func supplicantReason(log string) string {
 	var tempDisabled, rejected string
 	notFound := 0
+	keyRefused := false
 	for _, line := range strings.Split(log, "\n") {
+		if i := strings.Index(line, ptkRefused); i >= 0 && atLineStart(line, i) {
+			keyRefused = true
+			continue
+		}
 		name, rest, ok := ctrlEvent(line)
 		if !ok {
 			continue
@@ -246,6 +259,9 @@ func supplicantReason(log string) string {
 		}
 	}
 	switch {
+	case keyRefused:
+		return "that this Echo's WiFi driver refused the encryption key (" + ptkRefused +
+			"), so the passphrase was accepted and any WRONG_KEY that followed is misleading"
 	case tempDisabled == "WRONG_KEY":
 		return "WRONG_KEY: the AP rejected the passphrase"
 	case tempDisabled != "":
@@ -264,23 +280,29 @@ func supplicantReason(log string) string {
 // "Trying to associate with ... (SSID='...')", and an SSID can say anything.
 func ctrlEvent(line string) (name, rest string, ok bool) {
 	i := strings.Index(line, "CTRL-EVENT-")
-	if i < 0 {
+	if i < 0 || !atLineStart(line, i) {
 		return "", "", false
-	}
-	prefix := strings.Fields(line[:i])
-	if len(prefix) > 2 || (len(line[:i]) > 0 && !strings.HasSuffix(line[:i], " ")) {
-		return "", "", false
-	}
-	for _, p := range prefix {
-		if !strings.HasSuffix(p, ":") {
-			return "", "", false
-		}
 	}
 	ev := line[i:]
 	if j := strings.IndexAny(ev, " \t\r"); j >= 0 {
 		return ev[:j], ev[j:], true
 	}
 	return ev, "", true
+}
+
+// atLineStart says whether the text at line[i:] is where the supplicant's
+// message begins, with at most an interface and a timestamp before it.
+func atLineStart(line string, i int) bool {
+	prefix := strings.Fields(line[:i])
+	if len(prefix) > 2 || (i > 0 && !strings.HasSuffix(line[:i], " ")) {
+		return false
+	}
+	for _, p := range prefix {
+		if !strings.HasSuffix(p, ":") {
+			return false
+		}
+	}
+	return true
 }
 
 func firstField(s string) string {

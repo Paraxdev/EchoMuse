@@ -389,6 +389,70 @@ func TestSupplicantReasonFromHostapEvents(t *testing.T) {
 	}
 }
 
+// The sequence an Echo on emOS printed joining a mesh router with the right
+// passphrase: the driver refused the PTK, hostap deauthenticated itself and
+// then blamed the key. The lines are hostap 2.10's (rsn_supp/wpa.c and
+// events.c) with the address replaced.
+func TestSupplicantReasonWhenTheDriverRefusesThePTK(t *testing.T) {
+	refused := "wlan0: WPA: Failed to set PTK to the driver (alg=3 keylen=16 bssid=11:22:33:44:55:66 idx=0 key_flag=0xc)\n"
+	round := refused +
+		"wlan0: CTRL-EVENT-DISCONNECTED bssid=11:22:33:44:55:66 reason=1 locally_generated=1\n" +
+		"wlan0: WPA: 4-Way Handshake failed - pre-shared key may be incorrect\n" +
+		"wlan0: CTRL-EVENT-SSID-TEMP-DISABLED id=0 ssid=\"Home\" auth_failures=1 duration=10 reason=WRONG_KEY\n"
+	want := "that this Echo's WiFi driver refused the encryption key " +
+		"(WPA: Failed to set PTK to the driver), so the passphrase was accepted " +
+		"and any WRONG_KEY that followed is misleading"
+
+	cases := []struct{ name, log, want string }{
+		{"one round", round, want},
+		{"rounds until CONN_FAILED", round + round +
+			"wlan0: CTRL-EVENT-SSID-TEMP-DISABLED id=0 ssid=\"Home\" auth_failures=3 duration=60 reason=CONN_FAILED\n", want},
+		{"the refusal alone", refused, want},
+		{"timestamped", "1700000000.123456: " + refused, want},
+		// The build's retry succeeding leaves only its own lines, and the
+		// attempt then failed for some other reason.
+		{"a retry that worked", "wlan0: WPA: PTK install retry 1/3, the driver refused it\n" +
+			"wlan0: CTRL-EVENT-ASSOC-REJECT bssid=11:22:33:44:55:66 status_code=17\n",
+			"that the AP rejected the association (status 17)"},
+		// Quoted inside an SSID it is somebody's text, not the supplicant.
+		{"inside an SSID", "wlan0: Trying to associate with 11:22:33:44:55:66 (SSID='WPA: Failed to set PTK to the driver' freq=2412 MHz)\n" +
+			"wlan0: CTRL-EVENT-SSID-TEMP-DISABLED id=0 ssid=\"WPA: Failed to set PTK to the driver\" auth_failures=1 duration=10 reason=WRONG_KEY\n",
+			"WRONG_KEY: the AP rejected the passphrase"},
+		{"after other text on the line", "wlan0: note WPA: Failed to set PTK to the driver\n", ""},
+	}
+	for _, c := range cases {
+		if got := supplicantReason(c.log); got != c.want {
+			t.Errorf("%s: supplicantReason = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+func TestDiagnosisWhenTheDriverRefusesThePTK(t *testing.T) {
+	onBase(t, platform.EmOS, "", "ctrl_interface="+emosDir+"\n")
+	resetLastScan(t)
+	path := useNetLog(t, "")
+	appendFile(t, path, "")
+	m := markNetLog()
+	appendFile(t, path,
+		"wlan0: WPA: Failed to set PTK to the driver (alg=3 keylen=16 bssid=11:22:33:44:55:66 idx=0 key_flag=0xc)\n"+
+			"wlan0: CTRL-EVENT-DISCONNECTED bssid=11:22:33:44:55:66 reason=1 locally_generated=1\n"+
+			"wlan0: WPA: 4-Way Handshake failed - pre-shared key may be incorrect\n"+
+			"wlan0: CTRL-EVENT-SSID-TEMP-DISABLED id=0 ssid=\"Home\" auth_failures=1 duration=10 reason=WRONG_KEY\n")
+	useFakeCli(t, scanReply("aa\t5180\t-48\t[WPA2-PSK-CCMP][ESS]\tHome\n"))
+
+	got := diagnose([]byte("Home"), "12345678", m)
+	want := `"Home" is on the air: 5 GHz (5180 MHz), -48 dBm, [WPA2-PSK-CCMP][ESS]. ` +
+		`The supplicant reported that this Echo's WiFi driver refused the encryption key ` +
+		`(WPA: Failed to set PTK to the driver), so the passphrase was accepted and any ` +
+		`WRONG_KEY that followed is misleading.`
+	if got != want {
+		t.Errorf("got  %s\nwant %s", got, want)
+	}
+	if strings.Contains(got, "rejected the passphrase") {
+		t.Errorf("blames the passphrase: %s", got)
+	}
+}
+
 func TestNetLogSinceReadsOnlyThisAttempt(t *testing.T) {
 	path := useNetLog(t, strings.Repeat("old line\n", 10))
 	m := markNetLog()
