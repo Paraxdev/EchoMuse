@@ -1488,8 +1488,15 @@ function ConnectivityTab({ device, row }) {
   const mono  = "var(--font-mono)";
   const busy  = !!pending;
   const seenNet = (networks || []).find(n => n.ssid === ssid && n.ssid_hex);
+  // What the Echo's own scan said about the chosen name, when the firmware
+  // reports security: a typed name is held to it as a picked one is, the
+  // way the wizard's runConfigWifi does.
+  const pickedSec = _scanSecurity((networks || []).find(n => n.ssid === ssid)?.flags);
   const inputProblem = ssid
     ? (_ssidProblem(seenNet ? _hexBytes(seenNet.ssid_hex) : new TextEncoder().encode(ssid))
+       || (pickedSec?.blocker ? `Cannot join “${ssid}”: ${pickedSec.blocker}` : null)
+       || (pickedSec?.security === 'wpa2' && !psk ? `“${ssid}” needs a passphrase.` : null)
+       || (pickedSec?.security === 'open' && psk ? `“${ssid}” is an open network: leave the passphrase blank.` : null)
        || _pskProblem(psk))
     : null;
   const valid = !!ssid && !inputProblem;
@@ -1525,6 +1532,8 @@ function ConnectivityTab({ device, row }) {
       <div className="em-grid2" style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'var(--space-8)', alignItems:'start' }}>
         <Panel label="Current connection">
           {row('Network', currentSsid || '—')}
+          {row('Band', wifiBand(s?.wifiFreqMhz)
+            ? `${wifiBand(s.wifiFreqMhz)} · ${s.wifiFreqMhz} MHz` : '—')}
           {row('IP', device.ip && device.ip !== '127.0.0.1' ? device.ip : '—')}
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
             <span style={{ fontFamily:mono, fontSize:'var(--fs-sm)', color:'var(--muted)', textTransform:'uppercase', letterSpacing:'var(--tracking-label)' }}>Signal</span>
@@ -1548,15 +1557,46 @@ function ConnectivityTab({ device, row }) {
           )}
           {networks && networks.length > 0 && (
             <div style={{ maxHeight:170, overflowY:'auto' }}>
-              {networks.map(n => (
-                <div key={n.ssid} {...asButton(() => !busy && setSsid(n.ssid), { pressed: ssid === n.ssid, disabled: busy })}
-                  style={{ display:'flex', justifyContent:'space-between', alignItems:'center', padding:'var(--space-2) var(--space-4)', borderRadius:'var(--radius-md)', cursor: busy ? 'default' : 'pointer', background: ssid === n.ssid ? 'rgba(64,88,120,0.12)' : 'transparent' }}>
-                  <span title={n.ssid} style={{ fontFamily:mono, fontSize:'var(--fs-md)', color: ssid === n.ssid ? 'var(--accent)' : 'var(--text)', ..._ROW_TEXT }}>
-                    {n.ssid}{n.ssid === currentSsid ? '  ← current' : ''}
-                  </span>
-                  <span style={{ fontFamily:mono, fontSize:'var(--fs-sm)', color:'var(--muted)', ..._ROW_SIDE }}>{n.signal} dBm</span>
+              {networks.map(n => {
+                // Band and security come from firmware that reports freqs and
+                // flags; from older firmware a network shows name and signal
+                // only, never a guess. One the Echo cannot join stays listed
+                // with the reason, as in the wizard's picker, greyed by colour
+                // rather than opacity so its text stays readable.
+                const sec = _scanSecurity(n.flags);
+                const blocked = sec?.blocker || null;
+                const picked = ssid === n.ssid;
+                return (
+                <div key={n.ssid} {...asButton(() => { if (!busy && !blocked) setSsid(n.ssid); }, { pressed: picked, disabled: busy || !!blocked })}
+                  title={blocked || undefined}
+                  style={{ padding:'var(--space-2) var(--space-4)', borderRadius:'var(--radius-md)', cursor: busy ? 'default' : blocked ? 'not-allowed' : 'pointer', background: picked ? 'rgba(64,88,120,0.12)' : 'transparent' }}>
+                  {/* Wraps: on a phone the band and security drop under the
+                      name rather than widening the column past the screen. */}
+                  <div style={{ display:'flex', flexWrap:'wrap', columnGap:'var(--space-5)', alignItems:'center' }}>
+                    <span title={n.ssid} style={{ fontFamily:mono, fontSize:'var(--fs-md)', color: blocked ? 'var(--muted)' : picked ? 'var(--accent)' : 'var(--text)', ..._ROW_TEXT }}>
+                      {n.ssid}{n.ssid === currentSsid ? '  ← current' : ''}
+                    </span>
+                    <span style={{ fontFamily:mono, fontSize:'var(--fs-sm)', color:'var(--muted)', ..._ROW_SIDE, marginLeft:'auto' }}>
+                      {[sec?.label, _scanBands(n.freqs), `${n.signal} dBm`].filter(Boolean).join(' · ')}
+                    </span>
+                  </div>
+                  {blocked && (
+                    <div style={{ fontFamily:'var(--font-sans)', fontSize:'var(--fs-xs)', color:'var(--muted)', lineHeight:1.4 }}>{blocked}</div>
+                  )}
                 </div>
-              ))}
+                );
+              })}
+            </div>
+          )}
+          {/* Said only when the scan reports bands and none is 5 GHz, which is
+              the case that reads as "this Echo cannot do 5 GHz". It can; what
+              it cannot do is see a channel its driver's region leaves out. */}
+          {networks && networks.some(n => Array.isArray(n.freqs) && n.freqs.length)
+            && !networks.some(n => (n.freqs || []).some(f => f >= 4900)) && (
+            <div className="em-field__help" style={{ marginTop:'var(--space-4)', marginBottom:0 }}>
+              No 5 GHz network was seen. This Echo can join 5 GHz, but only on the
+              channels its WiFi driver allows; a router on another 5 GHz channel
+              does not appear here.
             </div>
           )}
         </Panel>
@@ -4145,6 +4185,61 @@ const _SECURITY_LABEL = {
   wpa2: 'WPA2', wpa3: 'WPA3', open: 'Open', wep: 'WEP', enterprise: 'Enterprise',
 };
 
+// What can this device actually join? Module scope so the wizard and an
+// Echo's Connectivity panel judge a network the same way.
+//
+// Measured on hardware (`wpa_cli get_capability key_mgmt`): NONE,
+// IEEE8021X, WPA-EAP, WPA-PSK. There is no SAE, so WPA3-Personal is not a
+// configuration problem, it is impossible on this radio, hence 'wpa3'
+// being refused outright rather than attempted. emOS's own supplicant is
+// built without SAE as well. Mixed WPA2/WPA3 APs advertise both and are
+// joinable through the WPA2 half.
+function classifySecurity(flags) {
+  const f = (flags || '').toUpperCase();
+  const hasPsk = f.includes('WPA-PSK') || f.includes('WPA2-PSK') || f.includes('PSK');
+  if (f.includes('EAP')) return 'enterprise';
+  if (f.includes('SAE') && !hasPsk) return 'wpa3';
+  if (hasPsk) return 'wpa2';
+  if (f.includes('WEP')) return 'wep';
+  return 'open';
+}
+
+// Why a network cannot be used, or null when it can. Neither the wizard nor
+// the firmware's network change writes anything but a PSK or an open block.
+function securityBlocker(security) {
+  if (security === 'wpa3') {
+    return 'WPA3 only. This Dot has no SAE support, so it cannot join. '
+         + 'Enable WPA2 compatibility mode on the router or hotspot.';
+  }
+  if (security === 'enterprise') {
+    return 'Enterprise (802.1X). EchoMuse cannot configure this.';
+  }
+  if (security === 'wep') {
+    return 'WEP. EchoMuse cannot configure this.';
+  }
+  return null;
+}
+
+// The bands a network from an Echo's own scan was seen on, from `freqs`
+// (every frequency its access points answered on). Null when the scan did
+// not carry them: older firmware reports name and signal only, and a guessed
+// band is worse than none, since the point is telling 2.4 from 5 GHz.
+function _scanBands(freqs) {
+  if (!Array.isArray(freqs) || !freqs.length) return null;
+  const bands = new Set(freqs.map(wifiBand).filter(Boolean));
+  const two = bands.has('2.4GHz'), five = bands.has('5GHz');
+  return two && five ? '2.4 + 5 GHz' : five ? '5 GHz' : two ? '2.4 GHz' : null;
+}
+
+// Security of a scanned network from its wpa_supplicant `flags`, or null
+// when the scan did not carry them (older firmware): unknown is not open.
+function _scanSecurity(flags) {
+  if (typeof flags !== 'string' || !flags) return null;
+  const security = classifySecurity(flags);
+  return { security, label: _SECURITY_LABEL[security] || security,
+           blocker: securityBlocker(security) };
+}
+
 const _MAGISK_FILENAME = 'Magisk-v17.3.zip';
 // f1r30s.zip from R0rt1z2's XDA thread: the one build this flow has been run
 // with. Rooting leaves it on /sdcard; a wipe or a tidy-up removes it, and the
@@ -6619,38 +6714,6 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     return networks;
   }
 
-  // What can this device actually join?
-  //
-  // Measured on hardware (`wpa_cli get_capability key_mgmt`): NONE,
-  // IEEE8021X, WPA-EAP, WPA-PSK. There is no SAE, so WPA3-Personal is not a
-  // configuration problem, it is impossible on this radio — hence 'wpa3'
-  // being refused outright rather than attempted. Mixed WPA2/WPA3 APs
-  // advertise both and are joinable through the WPA2 half.
-  function classifySecurity(flags) {
-    const f = (flags || '').toUpperCase();
-    const hasPsk = f.includes('WPA-PSK') || f.includes('WPA2-PSK') || f.includes('PSK');
-    if (f.includes('EAP')) return 'enterprise';
-    if (f.includes('SAE') && !hasPsk) return 'wpa3';
-    if (hasPsk) return 'wpa2';
-    if (f.includes('WEP')) return 'wep';
-    return 'open';
-  }
-
-  // Why a network cannot be used, or null when it can.
-  function securityBlocker(security) {
-    if (security === 'wpa3') {
-      return 'WPA3 only. This Dot has no SAE support, so it cannot join. '
-           + 'Enable WPA2 compatibility mode on the router or hotspot.';
-    }
-    if (security === 'enterprise') {
-      return 'Enterprise (802.1X). The wizard cannot configure this.';
-    }
-    if (security === 'wep') {
-      return 'WEP. The wizard cannot configure this.';
-    }
-    return null;
-  }
-
   // The exact bytes of the network the operator chose: from the scan when it
   // came from there (an SSID can hold bytes no display shows), otherwise the
   // UTF-8 of what they typed, which is the SSID for any name they can type.
@@ -8547,10 +8610,13 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   // part is the transport, which is why parseScanResults is shared rather than
   // reimplemented.
   //
-  // The flags column is the reason this is worth having at all: this radio
-  // reports no SAE, so a [SAE] network can never be joined however correct the
-  // password is, and a 5GHz-only one is invisible to it. Both present as an
-  // unexplained failure when someone types a name from memory.
+  // The flags and frequency columns are the reason this is worth having at
+  // all. This radio reports no SAE, so a WPA3-only network can never be
+  // joined however correct the password is. 5 GHz does work, but only on the
+  // channels the driver's regulatory table enables (joins are proven on
+  // channel 157 under its default WW domain); an AP on a channel outside
+  // that table never appears in the scan. Both present as an unexplained
+  // failure when someone types a name from memory.
   async function scanWifiConsole(con) {
     if (!con) throw new Error('No serial console — re-run the Reboot and Watch step.');
     const wpa = 'wpa_cli -p /data/misc/wifi/sockets -i wlan0';

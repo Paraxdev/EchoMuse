@@ -25,11 +25,23 @@ function lift(name) {
   }
   return eval(`(${src.slice(start, i + 1)})`);
 }
+function liftObject(name) {
+  const start = src.indexOf(`const ${name} = {`);
+  if (start < 0) throw new Error(`dashboard.jsx no longer defines ${name}`);
+  return eval(`(${src.slice(src.indexOf("{", start), src.indexOf("};", start) + 1)})`);
+}
 const activityTotals = lift("_activityTotals");
 const outcomeLabel   = lift("_outcomeLabel");
 const lastDrop       = lift("_lastDrop");
 const wakeWhere      = lift("_wakeWhere");
 const thresholdText  = lift("_thresholdText");
+// The scan helpers call these by name, so they are lifted under it.
+const wifiBand         = lift("wifiBand");
+const classifySecurity = lift("classifySecurity");
+const securityBlocker  = lift("securityBlocker");
+const _SECURITY_LABEL  = liftObject("_SECURITY_LABEL");
+const scanBands        = lift("_scanBands");
+const scanSecurity     = lift("_scanSecurity");
 
 let failed = 0;
 const check = (name, cond) => { if (!cond) { failed++; console.error(`FAIL: ${name}`); } };
@@ -91,6 +103,28 @@ check("a stored threshold reads as stored", thresholdText(0.175) === "0.175");
 check("no trailing zeros", thresholdText(0.5) === "0.5");
 check("float noise is trimmed", thresholdText(0.30000000000000004) === "0.3");
 check("absent is a dash", thresholdText(undefined) === "—");
+
+// _scanBands: Connectivity's networks carry freqs from newer firmware only.
+check("2.4 only", scanBands([2412, 2437]) === "2.4 GHz");
+check("5 only", scanBands([5180]) === "5 GHz");
+check("both bands, either order", scanBands([5785, 2462]) === "2.4 + 5 GHz");
+check("absent freqs is unknown, not 2.4", scanBands(undefined) === null);
+check("empty freqs is unknown", scanBands([]) === null);
+check("a zero frequency names no band", scanBands([0]) === null);
+
+// _scanSecurity: absent flags are unknown, never open.
+check("absent flags are unknown", scanSecurity(undefined) === null);
+check("empty flags are unknown", scanSecurity("") === null);
+const wpa2 = scanSecurity("[WPA2-PSK-CCMP][ESS]");
+check("WPA2 is labelled and joinable", wpa2.label === "WPA2" && wpa2.blocker === null);
+const wpa3 = scanSecurity("[SAE-CCMP][ESS]");
+check("WPA3-only is refused with a reason", wpa3.security === "wpa3" && typeof wpa3.blocker === "string");
+check("WPA2/WPA3 transition joins through WPA2",
+      scanSecurity("[WPA2-PSK+SAE-CCMP][ESS]").blocker === null);
+check("open is labelled open", scanSecurity("[ESS]").label === "Open");
+check("enterprise is refused", typeof scanSecurity("[WPA2-EAP-CCMP][ESS]").blocker === "string");
+check("the refusal does not name the wizard, which this is not",
+      !/wizard/i.test(scanSecurity("[WEP][ESS]").blocker));
 
 if (failed) { console.error(`\n${failed} check(s) failed`); process.exit(1); }
 console.log("home_tab: all checks passed");
