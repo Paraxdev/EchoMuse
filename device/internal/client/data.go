@@ -886,6 +886,7 @@ func (d *DataClient) connect(ctx context.Context, baseURL string) error {
 	})
 	done := make(chan struct{})
 	defer close(done)
+	answerPings(conn, "[data]", dataPongLog, done)
 
 	// Context watcher — cancellation must tear down an ESTABLISHED
 	// connection, not just abort a dial. The control client cancels this

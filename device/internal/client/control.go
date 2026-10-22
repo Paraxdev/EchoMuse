@@ -738,6 +738,7 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 		conn.SetReadDeadline(time.Now().Add(wsPongWait))
 		return nil
 	})
+	answerPings(conn, "[control]", controlPongLog, done)
 
 	go func() {
 		ticker := time.NewTicker(wsPingInterval)
