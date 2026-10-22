@@ -46,6 +46,7 @@ KINDS: dict[str, str] = {
     "vadSpeechMs": INT,
     "vadSilenceMs": INT,
     "owwThreshold": FLOAT,
+    "owwPatience": INT,   # applied by firmware announcing oww_patience
     "owwModel": STR,
     "owwOnDevice": STR,
     "bargeInEnabled": BOOL,

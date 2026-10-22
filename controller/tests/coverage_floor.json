@@ -87,6 +87,7 @@
  "em_volume.py": 99.0,
  "em_wake_samples.py": 85.0,
  "em_wakelevel.py": 99.0,
+ "em_wakepatience.py": 99.0,
  "em_wakeword.py": 99.0,
  "em_wav.py": 95.0,
  "em_wifi.py": 99.0,

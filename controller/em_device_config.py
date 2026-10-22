@@ -17,6 +17,7 @@ import em_oww_sync
 import em_scenes
 import em_shadow
 import em_tasks
+import em_wakepatience
 
 log = logging.getLogger("echomuse.api")
 
@@ -41,6 +42,8 @@ async def apply_live_config(device_id: str, live, effective: dict) -> None:
     await live.send_control({"type": "config", **effective})
     if "owwThreshold" in effective:
         live.oww_threshold = float(effective["owwThreshold"])
+    if "owwPatience" in effective:
+        live.oww_patience = em_wakepatience.clamp(effective["owwPatience"])
     if "owwModel" in effective:
         live.oww_model = effective["owwModel"]
         # Refresh HA's wake-word dropdown.
