@@ -103,7 +103,10 @@ type Scorer struct {
 	// scorer exactly as it was.
 	bargeThreshold float32
 	speakerActive  func() bool
-	refract        time.Duration
+	// patience is how many consecutive frames must clear the wake bar, 1 for
+	// the single frame this has always fired on (see SetPatience).
+	patience int
+	refract  time.Duration
 	onCross        func(score, threshold float32, at time.Time)
 
 	ch   chan queued
@@ -142,9 +145,9 @@ type Scorer struct {
 	stats     Stats
 	ready     bool
 	lastCross time.Time
-	// prevAbove is whether the previous scored frame cleared the bar in force,
-	// for the two-frame rule at the barge-in bar.
-	prevAbove bool
+	// streak counts consecutive scored frames that cleared the bar in force when
+	// each was scored, for patience and the two-frame rule at the barge bar.
+	streak int
 	// The barge window: frames scored at the barge-in bar since the last
 	// TakeBargeWindow, and the highest score among them. The answer to "did
 	// barge-in nearly fire, or was it nowhere close" — the controller's
@@ -242,6 +245,7 @@ func NewScorer(inf wakeword.Inferer, threshold float32, onCross func(score, thre
 	s := &Scorer{
 		det:       wakeword.New(inf),
 		threshold: threshold,
+		patience:  1,
 		refract:   DefaultRefractory,
 		onCross:   onCross,
 		ch:        make(chan queued, queueFrames),
@@ -258,6 +262,41 @@ func (s *Scorer) SetThreshold(t float32) {
 	s.mu.Lock()
 	s.threshold = t
 	s.mu.Unlock()
+}
+
+// MaxPatience bounds SetPatience. A run no wake word can sustain is a deaf
+// device, and 10 frames is 0.8s, about as long as a spoken wake word keeps a
+// score above its bar.
+const MaxPatience = 10
+
+// SetPatience sets how many consecutive 80ms frames must reach the wake
+// threshold before a crossing fires (owwPatience). 1 is the single-frame rule
+// this has always used; values below are treated as 1 and above MaxPatience
+// as MaxPatience.
+//
+// One frame over the bar was enough, and a custom model scored at a low bar
+// fired on room noise in single frames: 69 of one Echo's 133 wakes heard no
+// speech after them, most just over the bar. A real wake word holds its score
+// over several frames, a click or a cough over one. openWakeWord's own
+// predict() offers the same rule as `patience`. At the barge-in bar the
+// two-frame rule still applies when patience asks for fewer.
+func (s *Scorer) SetPatience(n int) {
+	if n < 1 {
+		n = 1
+	}
+	if n > MaxPatience {
+		n = MaxPatience
+	}
+	s.mu.Lock()
+	s.patience = n
+	s.mu.Unlock()
+}
+
+// Patience is the number of consecutive frames SetPatience asked for.
+func (s *Scorer) Patience() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.patience
 }
 
 // SetBargeThreshold sets the threshold used while the speaker is streaming, and
@@ -439,7 +478,7 @@ func (s *Scorer) run() {
 			s.det.Reset()
 			s.mu.Lock()
 			s.ready = false
-			s.prevAbove = false
+			s.streak = 0
 			s.hist, s.trace = nil, nil
 			s.mu.Unlock()
 		}
@@ -479,7 +518,12 @@ func (s *Scorer) run() {
 		// At the barge-in bar a single frame is not enough: that bar sits ~10x
 		// below the wake threshold and scores the assistant's own voice, and
 		// one frame there cut long answers off mid-sentence. Two consecutive
-		// frames, the same rule as the controller's em_barge.decide.
+		// frames, the same rule as the controller's em_barge.decide, or the
+		// patience asked for if that is more.
+		need := s.patience
+		if lowBar && need < 2 {
+			need = 2
+		}
 		if lowBar {
 			s.bargeFrames++
 			s.bargeBar = threshold
@@ -488,8 +532,12 @@ func (s *Scorer) run() {
 			}
 		}
 		above := score >= threshold
-		crossed := above && (!lowBar || s.prevAbove) && now.Sub(s.lastCross) >= s.refract
-		s.prevAbove = above
+		if above {
+			s.streak++
+		} else {
+			s.streak = 0
+		}
+		crossed := above && s.streak >= need && now.Sub(s.lastCross) >= s.refract
 		if crossed {
 			s.stats.Crossings++
 			s.lastCross = now

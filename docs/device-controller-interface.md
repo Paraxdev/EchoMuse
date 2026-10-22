@@ -109,6 +109,7 @@ below (`capabilities()` in `control.go`):
 | `buttons` | always | Emits `button` events |
 | `oww_shadow` | always | Can score the wake word locally and **report** (never act) |
 | `oww_trigger` | always | Can **act** on its own wake detection — kept separate from `oww_shadow` on purpose (see below) |
+| `oww_patience` | always | Reads `owwPatience` (1 to 10, larger values clamped to 10; it starts at 1, and absent or 0 leaves it unchanged, so send 1 to turn it off): its own wake word fires only after that many consecutive 80ms frames at the threshold in force, not on one. At the barge-in bar the device's two-frame rule applies when the patience is lower. Without it the device fires on a single frame whatever the setting, so a controller should show the setting disabled there |
 | `button_hold` | always | Emits long-press (`heldMs`) |
 | `audio_mix` | always | Holds music on its own frame types and mixes it under voice rather than pausing |
 | `oww_local_only` | always | Can listen **privately**: score its own wake word and send nothing until it fires. Whether it is doing so is `listen_state` — see [listening.md](listening.md) |
@@ -377,7 +378,7 @@ The canonical field set (repo-root `CLAUDE.md`, "Device config push"):
 
 ```
 vadThreshold, vadSpeechMs, vadSilenceMs,
-owwThreshold, owwModel, owwSpeexNs, owwOnDevice,
+owwThreshold, owwModel, owwSpeexNs, owwOnDevice, owwPatience,
 adcDigitalGain, adcMicpga, micGainDb,
 startupVolume,
 beamAngle, beamformingEnabled,

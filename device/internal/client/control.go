@@ -1293,8 +1293,12 @@ func capabilities() []string {
 	// "sendspin": this firmware can be a Sendspin player (internal/sendspin),
 	// switched by sendspinEnabled. Whether it is running, and paired, is the
 	// sendspin status, for the aec_hw_ref reason.
+	//
+	// "oww_patience": this firmware reads owwPatience and its own wake word
+	// fires only after that many consecutive frames at the threshold. Without
+	// it the setting does nothing on the Echo, which keeps firing on one frame.
 	caps := []string{"mic", "speaker", "leds", "led_anim", "buttons",
-		"oww_shadow", "oww_trigger", "button_hold", "audio_mix",
+		"oww_shadow", "oww_trigger", "oww_patience", "button_hold", "audio_mix",
 		"aec_hw_ref", "oww_local_only", "output_chain", "wake_cue", "volume_cue", "remote_volume_arc",
 		"response_level", "wake_mic", "pairing",
 		"wake_word_off", "sendspin", "ble_connect"}

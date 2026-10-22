@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/internal/wakeword"
 )
 
@@ -670,5 +671,166 @@ func TestBargeWindowReportsThePeakAtTheBargeBar(t *testing.T) {
 	}
 	if _, _, n := s.TakeBargeWindow(); n != 0 {
 		t.Fatal("window not reset")
+	}
+}
+
+// ─── patience (owwPatience) ───────────────────────────────────────────────────
+
+// crossCounter counts crossings and remembers the capture time of the last.
+type crossCounter struct {
+	mu   sync.Mutex
+	n    int
+	last time.Time
+}
+
+func (c *crossCounter) on(_, _ float32, at time.Time) {
+	c.mu.Lock()
+	c.n++
+	c.last = at
+	c.mu.Unlock()
+}
+
+func (c *crossCounter) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.n
+}
+
+// pushScored feeds one frame at score, stamped at, and waits for it to be
+// scored.
+func pushScored(t *testing.T, s *Scorer, inf *fakeInferer, score float32, at time.Time) {
+	t.Helper()
+	inf.set(score, 0)
+	before := s.processed()
+	s.PushBytesAt(make([]byte, wakeword.ChunkSamples*2), at)
+	waitFor(t, "a frame to be scored", func() bool { return s.processed() > before })
+}
+
+func warm(t *testing.T, s *Scorer, inf *fakeInferer) {
+	t.Helper()
+	inf.set(0.0, 0)
+	pushAll(t, s, wakeword.FeatWindow+1)
+	waitFor(t, "detector to become ready", func() bool { return s.Ready() })
+}
+
+// With patience N, a crossing needs N consecutive frames at the wake bar, and
+// fires on the Nth, reporting that frame's capture time.
+func TestPatienceNeedsConsecutiveFramesAtTheWakeBar(t *testing.T) {
+	var c crossCounter
+	inf := &fakeInferer{}
+	s := NewScorer(inf, 0.5, c.on)
+	defer s.Close()
+	s.SetPatience(3)
+	warm(t, s, inf)
+
+	// Runs of one and two, broken each time: never a crossing.
+	for _, run := range []int{1, 2, 1, 2} {
+		for i := 0; i < run; i++ {
+			pushScored(t, s, inf, 0.9, time.Now())
+		}
+		pushScored(t, s, inf, 0.1, time.Now())
+	}
+	if n := c.count(); n != 0 {
+		t.Fatalf("crossed %d times on runs shorter than the patience", n)
+	}
+
+	pushScored(t, s, inf, 0.9, time.Now())
+	pushScored(t, s, inf, 0.6, time.Now())
+	third := time.Now().Add(-time.Second)
+	pushScored(t, s, inf, 0.7, third)
+	waitFor(t, "a crossing on the third frame", func() bool { return c.count() == 1 })
+	c.mu.Lock()
+	last := c.last
+	c.mu.Unlock()
+	if !last.Equal(third) {
+		t.Fatalf("crossing dated %v, want the third frame's capture time %v", last, third)
+	}
+	if st := s.Drain(); st.Crossings != 1 {
+		t.Fatalf("stats recorded %d crossings, want 1", st.Crossings)
+	}
+}
+
+// A frame just under the bar breaks the run, however close; one at the bar
+// counts, as it always has (>=).
+func TestPatienceRunIsBrokenByAFrameUnderTheBar(t *testing.T) {
+	var c crossCounter
+	inf := &fakeInferer{}
+	s := NewScorer(inf, 0.5, c.on)
+	defer s.Close()
+	s.SetPatience(2)
+	warm(t, s, inf)
+	pushScored(t, s, inf, 0.5, time.Now())
+	pushScored(t, s, inf, 0.499, time.Now())
+	pushScored(t, s, inf, 0.5, time.Now())
+	if n := c.count(); n != 0 {
+		t.Fatalf("crossed %d times without two consecutive frames", n)
+	}
+	pushScored(t, s, inf, 0.5, time.Now())
+	waitFor(t, "a crossing at the bar", func() bool { return c.count() == 1 })
+}
+
+// At the barge-in bar the two-frame rule stays, and a larger patience applies
+// there too.
+func TestPatienceAppliesAtTheBargeBarWhenItAsksForMore(t *testing.T) {
+	var c crossCounter
+	inf := &fakeInferer{}
+	s := NewScorer(inf, 0.5, c.on)
+	defer s.Close()
+	s.SetBargeThreshold(0.10, func() bool { return true })
+	s.SetPatience(3)
+	warm(t, s, inf)
+	pushScored(t, s, inf, 0.2, time.Now())
+	pushScored(t, s, inf, 0.2, time.Now())
+	if n := c.count(); n != 0 {
+		t.Fatalf("crossed after two frames at the barge bar with patience 3")
+	}
+	pushScored(t, s, inf, 0.2, time.Now())
+	waitFor(t, "a three-frame barge crossing", func() bool { return c.count() == 1 })
+}
+
+// A mic restart must not carry a run across the gap.
+func TestResetClearsTheRun(t *testing.T) {
+	var c crossCounter
+	inf := &fakeInferer{}
+	s := NewScorer(inf, 0.5, c.on)
+	defer s.Close()
+	s.SetPatience(2)
+	warm(t, s, inf)
+	pushScored(t, s, inf, 0.9, time.Now())
+	s.Reset()
+	// Frames scored while the detector warms up again touch no run, so with
+	// every frame at 0.9 the first ready one would complete a run the reset
+	// failed to clear.
+	pushScored(t, s, inf, 0.9, time.Now())
+	for i := 0; !s.Ready(); i++ {
+		if i > wakeword.FeatWindow+5 {
+			t.Fatal("detector never became ready after the reset")
+		}
+		pushScored(t, s, inf, 0.9, time.Now())
+	}
+	if n := c.count(); n != 0 {
+		t.Fatalf("a run survived a reset (%d crossings)", n)
+	}
+	pushScored(t, s, inf, 0.9, time.Now())
+	waitFor(t, "a crossing after a fresh run", func() bool { return c.count() == 1 })
+}
+
+func TestSetPatienceClampsToWhatCanFire(t *testing.T) {
+	s := NewScorer(&fakeInferer{}, 0.5, nil)
+	defer s.Close()
+	if got := s.Patience(); got != 1 {
+		t.Fatalf("default patience %d, want the single frame it always fired on", got)
+	}
+	for in, want := range map[int]int{0: 1, -3: 1, 1: 1, 4: 4, MaxPatience: MaxPatience, 99: MaxPatience} {
+		s.SetPatience(in)
+		if got := s.Patience(); got != want {
+			t.Errorf("SetPatience(%d) gave %d, want %d", in, got, want)
+		}
+	}
+}
+
+func TestMaxPatienceMatchesTheConfigClamp(t *testing.T) {
+	if MaxPatience != config.MaxOwwPatience {
+		t.Fatalf("shadow.MaxPatience %d, config.MaxOwwPatience %d", MaxPatience, config.MaxOwwPatience)
 	}
 }

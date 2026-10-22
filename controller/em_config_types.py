@@ -47,6 +47,7 @@ KINDS: dict[str, str] = {
     "vadSilenceMs": INT,
     "owwThreshold": FLOAT,
     "owwModel": STR,
+    "owwPatience": INT,
     "owwOnDevice": STR,
     "bargeInEnabled": BOOL,
     "bargeInThreshold": FLOAT,
