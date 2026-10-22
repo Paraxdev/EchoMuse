@@ -16,13 +16,21 @@ deployments behave alike. The device sets the same on its own sockets
 import logging
 import socket
 import struct
+import sys
 
 log = logging.getLogger("echomuse.tcp")
 
 # Numbers from include/uapi/linux/tcp.h, for a Python that lacks the names.
 TCP_THIN_LINEAR_TIMEOUTS = getattr(socket, "TCP_THIN_LINEAR_TIMEOUTS", 16)
+# Linux's number only: other systems that have the option number it differently.
+TCP_NOTSENT_LOWAT = getattr(socket, "TCP_NOTSENT_LOWAT",
+                            25 if sys.platform.startswith("linux") else None)
+
+# What a bulk shell-plane transfer may leave queued in the kernel unsent.
+BULK_UNSENT_BYTES = 64 * 1024
 
 _warned = False
+_warned_unsent = False
 
 
 def tune(sock) -> bool:
@@ -41,6 +49,37 @@ def tune(sock) -> bool:
         if not _warned:
             _warned = True
             log.warning(f"Thin-stream TCP not applied ({e}) - device link keeps exponential backoff")
+        return False
+
+
+def limit_unsent(sock, nbytes: int = BULK_UNSENT_BYTES) -> bool:
+    """Cap what a bulk-sending socket may hold in the kernel unsent.
+
+    The shell plane carries multi-megabyte transfers. The kernel grows a send
+    buffer while the link is good and never shrinks it when loss collapses the
+    window, so megabytes can sit queued. websockets starts the keepalive
+    timeout once the ping has left ITS buffer, but the kernel's queue is still
+    ahead of it: on a link moving 50KB/s a ping could wait longer than the 30s
+    it is allowed, which is the likely mechanism of the `1011 keepalive ping
+    timeout` closes seen mid-OTA in the field (2026-10-13) while the control
+    plane stayed up. With TCP_NOTSENT_LOWAT the socket stops taking data once
+    this much is waiting, so the excess stays in the asyncio transport, which
+    websockets bounds by awaiting its drain, and a ping is queued behind
+    kilobytes. Bytes in flight are not counted, so a clean link is as fast.
+
+    Never raises, for tune()'s reason. Returns whether the option was applied.
+    """
+    global _warned_unsent
+    if sock is None or TCP_NOTSENT_LOWAT is None:
+        return False
+    try:
+        sock.setsockopt(socket.IPPROTO_TCP, TCP_NOTSENT_LOWAT, nbytes)
+        return True
+    except OSError as e:
+        if not _warned_unsent:
+            _warned_unsent = True
+            log.warning(f"TCP_NOTSENT_LOWAT not applied ({e}), so a bulk shell "
+                        f"transfer can queue its keepalive behind megabytes")
         return False
 
 

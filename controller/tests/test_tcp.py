@@ -43,6 +43,91 @@ def test_tune_never_raises():
     assert em_tcp.tune(s) is False
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux socket option")
+def test_limit_unsent_caps_what_the_kernel_may_queue(accepted):
+    assert em_tcp.limit_unsent(accepted) is True
+    got = accepted.getsockopt(socket.IPPROTO_TCP, em_tcp.TCP_NOTSENT_LOWAT)
+    assert got == em_tcp.BULK_UNSENT_BYTES
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux socket option")
+def test_limit_unsent_bounds_what_a_send_hands_the_kernel(accepted):
+    """
+    The point of the option, measured: with the reader not reading, the
+    socket stops taking data at the cap instead of at the send buffer. The
+    receiver's window is in flight and not counted, so the bound is the
+    window plus the cap, against megabytes without it.
+    """
+    def fill(sock):
+        sock.setblocking(False)
+        sent, chunk = 0, b"x" * 65536
+        try:
+            while sent < 64 * 1024 * 1024:
+                sent += sock.send(chunk)
+        except BlockingIOError:
+            pass
+        return sent
+
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(2)
+    plain = socket.create_connection(srv.getsockname())
+    plain_peer, _ = srv.accept()
+    capped = socket.create_connection(srv.getsockname())
+    capped_peer, _ = srv.accept()
+    try:
+        # Measured in the test image: 2.6MB taken without it, 192KB with.
+        em_tcp.limit_unsent(capped)
+        unbounded, bounded = fill(plain), fill(capped)
+        assert bounded < unbounded / 2, (bounded, unbounded)
+    finally:
+        for s in (plain, plain_peer, capped, capped_peer, srv):
+            s.close()
+
+
+def test_limit_unsent_never_raises():
+    assert em_tcp.limit_unsent(None) is False
+    s = socket.socket()
+    s.close()
+    assert em_tcp.limit_unsent(s) is False
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux socket option")
+def test_programmatic_shell_sessions_cap_unsent_data(accepted):
+    """em_shell applies it to the socket of every programmatic session it
+    opens, which is where the bulk transfers run."""
+    import asyncio
+    import em_shell
+    import em_state
+
+    class Transport:
+        def get_extra_info(self, name):
+            return accepted if name == "socket" else None
+
+    class WS:
+        transport = Transport()
+
+        async def close(self):
+            pass
+
+    class Live:
+        device_id = "tcp-dev"
+
+        async def send_control(self, msg):
+            if msg["type"] == "shell_open":
+                em_state.shell_pending[self.device_id].set_result(WS())
+
+    async def main():
+        live = Live()
+        await em_shell.get_ws(live)
+        await em_shell.release_ws(live.device_id, live)
+
+    asyncio.run(main())
+    em_shell.locks.pop("tcp-dev", None)
+    assert accepted.getsockopt(socket.IPPROTO_TCP, em_tcp.TCP_NOTSENT_LOWAT) \
+        == em_tcp.BULK_UNSENT_BYTES
+
+
 def test_every_device_plane_is_tuned():
     # All three planes (/control, /data, /shell) arrive through _route, so
     # that is where the call must sit, ahead of the dispatch.

@@ -133,6 +133,9 @@ async def on_connect(device_id: str, live) -> None:
     that crashed and came back inside the window is exactly the one to look
     at, and the on-device marker already makes a repeat check one round trip.
     """
+    # Spawned by the register handler, so this is when the connection began.
+    # The wake word assets hold a multi-MB push until it is a minute old.
+    connected_at = time.monotonic()
     if not live.android_userspace:
         try:
             await _collect_crash_log(live, device_id)
@@ -150,7 +153,7 @@ async def on_connect(device_id: str, live) -> None:
     # Held as callables, not coroutines: building all three up front and
     # abandoning two of them leaves un-awaited coroutines to warn about later.
     steps = [
-        ("oww assets", lambda: em_oww_sync.reconcile(device_id, live)),
+        ("oww assets", lambda: em_oww_sync.reconcile(device_id, live, connected_at)),
         ("start script", lambda: em_payloads.sync_start_script(live, device_id)),
         ("controller address", lambda: em_payloads.sync_endpoints(live, device_id)),
     ]
