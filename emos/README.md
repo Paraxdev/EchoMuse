@@ -470,8 +470,10 @@ watchdog step, init copies the log's last 32KB to `/data/emos/net.last`
 behind a one-line summary (why, uptime, wall time if the controller has set
 the clock, carrier, address, gateway, how long off the network, watchdog
 steps, packet counters), keeping the copy before as `net.last.1`. At most two
-copies per incident and never two within 30 minutes, so a link that fails
-all day costs about 1.5MB of writes and a working one nothing. Read it with
+copies per incident (which ends when the gateway answers again, or cannot be
+asked) and never two within 30 minutes, so a link that fails all day costs
+about 1.5MB of writes and a working one nothing. The carrier a watchdog step
+drops itself counts as part of the outage it acts on. Read it with
 `cat /data/emos/net.last`; the controller also reports each new copy, with
 network names and addresses redacted, in the Echo's log when it next
 connects.

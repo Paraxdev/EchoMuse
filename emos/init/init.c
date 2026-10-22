@@ -2246,7 +2246,9 @@ static unsigned long long read_counter(const char *path)
  * one-line summary, the copy before kept as NETLAST.1.
  *
  * Flash is rationed. At most NETLAST_PER_INCIDENT copies per incident, which
- * ends when the gateway answers again: the first from when the trouble was
+ * ends where the watchdog's outage does, when the gateway answers again or
+ * cannot be asked (without arping no answer ever comes, and two copies would
+ * then be all a boot ever kept): the first from when the trouble was
  * noticed, the second showing what the watchdog then tried. Never two within
  * NETLAST_GAP_S; an event inside the gap is written when it ends, with
  * everything logged meanwhile. A link that fails all day costs about 1.5MB of
@@ -2278,7 +2280,7 @@ static void netlast_event(struct netlast *n, const char *why)
         snprintf(n->why, sizeof n->why, "%s", why);
 }
 
-/* The gateway answered: the next failure is a new incident. */
+/* The outage is over: the next failure is a new incident. */
 static void netlast_settled(struct netlast *n)
 {
     n->writes = 0;
@@ -2727,12 +2729,11 @@ static void net_main(void)
                        "rx_packets %llu\n", gw, read_counter(
                            "/sys/class/net/wlan0/statistics/rx_packets"));
             silent = link == LINK_SILENT;
-            if (link == LINK_OK) {
-                if (wd.off_since >= 0)
-                    netlog("link watchdog: gateway %s answering again after "
-                           "%lds off the network\n", gw, now - wd.off_since);
+            if (link == LINK_OK && wd.off_since >= 0)
+                netlog("link watchdog: gateway %s answering again after "
+                       "%lds off the network\n", gw, now - wd.off_since);
+            if (link == LINK_OK || link == LINK_UNKNOWN)
                 netlast_settled(&nl);
-            }
             int act = linkwd_step(&wd, now, link);
             if (act != WD_NONE) {
                 netlog("link watchdog: off the network %lds, rx_packets %llu, "
@@ -2768,6 +2769,11 @@ static void net_main(void)
                            ifup("wlan0"));
                     break;
                 }
+                /* The step's own drop of carrier or address belongs to the
+                 * outage already being followed. Announced as a new link
+                 * loss, it would also take the place of the step as the
+                 * reason the next copy gives. */
+                had_carrier = had_ip = 0;
             }
         }
         if (netlast_due(&nl, now, why, sizeof why))
