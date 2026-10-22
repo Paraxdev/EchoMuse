@@ -38,5 +38,5 @@ RUN EARCH="$(dpkg --print-architecture)" && case "$EARCH" in amd64) EPKG=linux-x
  && curl -sfL -o /tmp/esbuild.tar.gz "https://registry.npmjs.org/@esbuild/${EPKG}/-/${EPKG}-0.20.2.tgz" \
  && tar -xz -C /tmp -f /tmp/esbuild.tar.gz \
  && install -m755 /tmp/package/bin/esbuild /usr/local/bin/esbuild \
- && esbuild /app/static/dashboard.jsx --bundle=false --jsx=transform --jsx-factory=React.createElement --jsx-fragment=React.Fragment --outfile=/app/static/dashboard.js \
+ && esbuild /app/static/dashboard.jsx --bundle=false --jsx=transform --jsx-factory=React.createElement --jsx-fragment=React.Fragment --minify --outfile=/app/static/dashboard.js \
  && rm -rf /tmp/esbuild.tar.gz /tmp/package /usr/local/bin/esbuild
