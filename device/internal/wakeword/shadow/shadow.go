@@ -107,7 +107,7 @@ type Scorer struct {
 	// the single frame this has always fired on (see SetPatience).
 	patience int
 	refract  time.Duration
-	onCross        func(score, threshold float32, at time.Time)
+	onCross  func(score, threshold float32, at time.Time)
 
 	ch   chan queued
 	done chan struct{}
