@@ -3253,3 +3253,28 @@ def test_the_image_keeps_its_data_on_the_mounted_directory():
         assert ":/app/data" in (root / compose).read_text(), compose
     # The add-on keeps its own path, which has to win over the image's.
     assert 'DB_PATH: "/data/echomuse.db"' in (root / "config.yaml").read_text()
+
+
+def test_every_workflow_image_name_is_lowercased():
+    """
+    Docker refuses an image reference with capitals in it, and
+    github.repository_owner keeps the owner's case: on a fork owned by
+    "Paraxdev" every push, attestation and scan would fail. Workflow
+    expressions cannot lowercase, so each job that names an image makes
+    IMAGE in a step before any step uses it.
+    """
+    import json
+    import yaml
+    lowercasing = re.compile(r"IMAGE=ghcr\.io/\$\(printf '%s' \"\$OWNER\" \| tr '\[:upper:\]' '\[:lower:\]'\)/")
+    workflows = CONTROLLER.parent / ".github" / "workflows"
+    for wf in sorted(workflows.glob("*.yml")):
+        text = wf.read_text(encoding="utf-8")
+        assert not re.search(r"ghcr\.io/\$\{\{\s*github\.repository_owner", text), \
+            f"{wf.name} builds an image name from the owner as written"
+        for job_name, job in (yaml.safe_load(text).get("jobs") or {}).items():
+            steps = job.get("steps") or []
+            made = [i for i, s in enumerate(steps) if lowercasing.search(str(s.get("run", "")))]
+            users = [i for i, s in enumerate(steps)
+                     if re.search(r"env\.IMAGE|\$\{?IMAGE\b", json.dumps(s)) and i not in made]
+            if users:
+                assert made and made[0] < users[0], f"{wf.name}:{job_name} uses IMAGE before making it"
