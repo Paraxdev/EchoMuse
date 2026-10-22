@@ -51,7 +51,7 @@ def run(out: str) -> dict:
             short = sn[-4:]
             p.get_by_text(f"UAT {short}", exact=True).first.click()
             p.wait_for_timeout(1000)
-            for tab in ("status", "activity", "config", "updates", "logs"):
+            for tab in ("home", "status", "activity", "config", "updates", "logs"):
                 try:
                     p.get_by_role("button", name=tab, exact=True).click()
                     p.wait_for_timeout(800)

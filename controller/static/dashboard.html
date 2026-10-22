@@ -161,22 +161,27 @@
     }
 
     /* ── Scale tokens: type, font and corner radius ───────────────────
-       The same in both themes, so defined once. Each value is one the
-       dashboard already used, so converting a call site to its token
-       changes nothing on screen (#820). Values used too rarely to name
-       stay literal for now; tests/test_design_scale.py counts them and the
-       count can only fall. */
+       The same in both themes, so defined once. Values used too rarely to
+       name stay literal for now; tests/test_design_scale.py counts them and
+       the count can only fall.
+
+       The type steps were 8-16px, the sizes the dashboard used when the
+       scale was introduced (#820), and most of the page is set in them:
+       help text at 10px and labels at 9px read as unreadable on a high-DPI
+       screen or a phone (#945). They moved up together, keeping the order,
+       so every call site grew at once. The wizard's own literal sizes do
+       not follow until #687 and #358. */
     :root {
       --font-sans: 'DM Sans', sans-serif;
       --font-mono: 'DM Mono', monospace;
 
-      --fs-2xs:  8px;
-      --fs-xs:   9px;
-      --fs-sm:  10px;
-      --fs-md:  11px;
-      --fs-base: 12px;
-      --fs-lg:  14px;
-      --fs-xl:  16px;
+      --fs-2xs: 10px;
+      --fs-xs:  11px;
+      --fs-sm:  12px;
+      --fs-md:  13px;
+      --fs-base: 14px;
+      --fs-lg:  16px;
+      --fs-xl:  18px;
       --fs-2xl: 24px;
       --fs-3xl: 28px;
 
@@ -264,6 +269,10 @@
        glyph itself carries the progress. */
     .em-iconbtn--busy > svg { animation: em-spin 0.9s linear infinite; }
     @keyframes em-spin { to { transform: rotate(360deg); } }
+    /* The modals' entrance (inline `animation: fadeIn` on the device,
+       Settings and wizard frames), which named a keyframe nothing defined,
+       so it never ran. */
+    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
     @media (prefers-reduced-motion: reduce) {
       .em-iconbtn--busy > svg { animation: none; opacity: 0.55; }
     }
@@ -450,10 +459,20 @@
     /* A light system scrollbar on these dark panes read as a white strip. */
     .em-wizard-scroll, .em-console { scrollbar-width: thin; scrollbar-color: var(--muted) transparent; }
 
+    /* A text button that moves to another tab ("Status →" under a Home
+       card): reads as a link, is a button because it navigates in-page. */
+    .em-linkbtn {
+      background: none; border: none; padding: 0; cursor: pointer;
+      font-family: var(--font-mono); font-size: var(--fs-sm); color: var(--accent);
+      letter-spacing: var(--tracking-text);
+    }
+    .em-linkbtn:hover { text-decoration: underline; }
+
     /* Keyboard focus. Inline styles cannot express :focus-visible at all, so
        until now there was no focus ring anywhere in the dashboard. */
     .em-iconbtn:focus-visible,
     .em-pill:focus-visible,
+    .em-linkbtn:focus-visible,
     .em-tab:focus-visible,
     .em-input:focus-visible,
     [role="button"]:focus-visible,
@@ -471,8 +490,8 @@
       .em-summary { flex-wrap: wrap !important; }
       .em-summary > div { flex: 1 1 40% !important; }
       .em-summary > .em-summary-release { flex: 1 1 100% !important; }
-      /* Modals go full-screen — the desktop frame is min(900px,95vw) ×
-         min(700px,90vh), which leaves useless slivers of backdrop on a
+      /* Modals go full-screen: the desktop frame is min(1120px,96vw) ×
+         min(880px,92vh), which leaves useless slivers of backdrop on a
          phone. 100dvh tracks the browser chrome collapsing on scroll. */
       .em-modal      { width: 100vw !important; height: 100dvh !important; border-radius: 0 !important; }
       .em-modal-head { padding: 12px 14px 0 !important; }
@@ -502,8 +521,10 @@
     .em-field__label { font-family: var(--font-mono); font-size: var(--fs-md); color: var(--text2); }
     .em-field__label--disabled { color: var(--muted); }
     .em-field__aside { font-family: var(--font-mono); font-size: var(--fs-sm); color: var(--muted); margin-left: var(--space-4); }
+    /* Sans, unlike the label above it: help is a sentence to read, and a
+       paragraph of mono reads as a log line. */
     .em-field__help {
-      font-family: var(--font-mono); font-size: var(--fs-sm); color: var(--muted);
+      font-family: var(--font-sans); font-size: var(--fs-sm); color: var(--muted);
       line-height: 1.6; margin-bottom: var(--space-4);
     }
 
@@ -529,8 +550,8 @@
   </style>
   <script>
     // Set the theme BEFORE first paint. Done here, inline and synchronous,
-    // rather than in React: the bundle is 200KB and loads at the end of
-    // <body>, so a dark-mode user would get a full flash of the light
+    // rather than in React: the bundle is ~300KB even minified and loads at
+    // the end of <body>, so a dark-mode user would get a full flash of the light
     // dashboard on every navigation.
     (function () {
       try {

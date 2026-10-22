@@ -232,6 +232,43 @@ function _emitDeviceLog(deviceId, entry) {
   _logSubs.forEach(fn => { try { fn(deviceId, entry); } catch (e) { console.error(e); } });
 }
 
+// Developer tools: the root Console tab, Local Build and Local payload,
+// Re-apply debloat, and the diagnostic wake word mode. Off unless switched
+// on in Settings > System, because an admin who is not developing EchoMuse
+// has no reason to reach for them and several can leave an Echo needing a
+// USB cable. Per browser, in localStorage; where storage is refused the
+// choice still holds for the session.
+const DEV_TOOLS_KEY = 'em-devtools';
+let _devTools = (() => {
+  try { return localStorage.getItem(DEV_TOOLS_KEY) === '1'; } catch (e) { return false; }
+})();
+const _devToolsSubs = new Set();
+function _announceDevTools() { _devToolsSubs.forEach(fn => fn(_devTools)); }
+function setDevTools(on) {
+  _devTools = !!on;
+  try {
+    if (_devTools) localStorage.setItem(DEV_TOOLS_KEY, '1');
+    else localStorage.removeItem(DEV_TOOLS_KEY);
+  } catch (e) { /* private mode */ }
+  _announceDevTools();
+}
+// The switch flipped in another window of this browser, which is the only
+// way it changes under an open device view; key null is storage cleared.
+window.addEventListener('storage', e => {
+  if (e.key !== DEV_TOOLS_KEY && e.key !== null) return;
+  _devTools = e.newValue === '1' && e.key === DEV_TOOLS_KEY;
+  _announceDevTools();
+});
+function useDevTools() {
+  const [on, setOn] = useState(_devTools);
+  useEffect(() => {
+    _devToolsSubs.add(setOn);
+    setOn(_devTools);
+    return () => { _devToolsSubs.delete(setOn); };
+  }, []);
+  return on;
+}
+
 function deviceState(d) {
   if (!d.approved)  return { key: 'pending',   label: 'Pending',   color: 'var(--accent-hi)', dot: '#8ab0d0', lcd: 'var(--accent-lit)' };
   if (!d.connected) return { key: 'offline',   label: 'Offline',   color: 'var(--warn)', dot: '#d4703a', lcd: 'var(--lcd-offline)' };
@@ -669,6 +706,8 @@ function Select({ label, sub, value, options, onChange, disabled = false }) {
       <div style={{ marginBottom: 'var(--space-3)', minWidth: 0 }}>
         <span className="em-field__label">{label}</span>
       </div>
+      {/* A label may wrap inside its pill (.em-pill is nowrap): three options
+          in a phone-width column otherwise ran past the screen. */}
       <div role="radiogroup" aria-label={typeof label === 'string' ? label : undefined}
         style={{ display: 'flex', gap: 'var(--space-3)', minWidth: 0 }}>
         {options.map(o => (
@@ -677,7 +716,7 @@ function Select({ label, sub, value, options, onChange, disabled = false }) {
             role="radio" aria-checked={o.value === value}
             className={'em-pill em-pill--small' + (o.value === value ? ' em-pill--accent' : '')}
             disabled={disabled || !!o.disabled}
-            style={{ flex: 1, minWidth: 0 }}
+            style={{ flex: 1, minWidth: 0, whiteSpace: 'normal' }}
             onClick={() => { if (!(disabled || o.disabled)) onChange(o.value); }}>
             {o.label}
           </button>
@@ -1202,8 +1241,14 @@ function WakeSampleReview({ deviceId, isAdmin }) {
   </div>;
 }
 
-function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMisses, stateLabel, stateColor, isAdmin }) {
+function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMisses, day, stateLabel, stateColor, isAdmin }) {
   const [hover, setHover] = useState(null); // index into `recent`
+  // A tapped turn keeps its detail open: a touch screen has no hover, so
+  // the detail was mouse-only. Held by turn rather than by row, since the
+  // list refreshes every 10s and a new turn shifts every index down one.
+  const [pinned, setPinned] = useState(null);
+  const turnKey = t => t.turn_id ?? t.ts;
+  const togglePin = t => setPinned(p => p === turnKey(t) ? null : turnKey(t));
   const mono = "var(--font-mono)";
 
   // Saved utterances — play in place or download the WAV. Both go through
@@ -1282,6 +1327,8 @@ function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMis
   // rest of the tab) out of view.
   const recent = turns.slice().reverse();
   const scale = Math.max(3000, ...recent.map(t => turnSegments(t).shown));
+  const pinnedAt = pinned == null ? -1 : recent.findIndex(t => turnKey(t) === pinned);
+  const shown = hover != null ? hover : pinnedAt >= 0 ? pinnedAt : null;
 
   return (
     <div>
@@ -1294,6 +1341,13 @@ function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMis
         <Lcd label="Median reply" value={medianReply != null ? fmtS(medianReply) : '—'} color="var(--lcd-dim)" size={16}/>
         <Lcd label="Near-misses" value={nearMisses != null ? nearMisses : '—'}
              color={nearMisses > 0 ? 'var(--lcd-amber)' : 'var(--lcd-dim)'} size={16}/>
+        {/* From the turns table, so it survives a reconnect, which resets
+            Near-misses above; amber once nothing-heard outnumbers answered. */}
+        <div title="Turns in the last 24 hours that opened and heard nothing said. After a wake word that is usually a false wake.">
+          <Lcd label="Heard nothing · 24 h"
+               value={!day ? '—' : day.turns ? `${day.heardNothing}/${day.turns}` : '0'}
+               color={day && day.heardNothing > day.ok ? 'var(--lcd-amber)' : 'var(--lcd-dim)'} size={16}/>
+        </div>
         <Lcd label="Underruns" value={turns.reduce((s, t) => s + (t.underruns || 0), 0)}
              color={turns.some(t => t.underruns > 0) ? 'var(--lcd-amber)' : 'var(--lcd-dim)'} size={16}/>
       </div>
@@ -1325,11 +1379,20 @@ function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMis
             const seg = turnSegments(t);
             const time = new Date(t.ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
             const failed = t.outcome !== 'ok';
+            // Hover follows mouse pointers only: a tap fires pointerenter
+            // too, which would open the detail the same tap's click closed.
             return (
               <div key={i}
-                onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)}
-                style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-5)', padding: 'var(--space-2) 0', cursor: 'default', background: hover === i ? 'var(--hairline)' : 'transparent', borderRadius: 'var(--radius-sm)' }}>
-                <span style={{ fontFamily: mono, fontSize: 'var(--fs-xs)', color: 'var(--muted)', minWidth: '8ch', flexShrink: 0, textAlign: 'right', whiteSpace: 'nowrap' }}>{time}</span>
+                onClick={e => { if (!e.target.closest('button')) togglePin(t); }}
+                onPointerEnter={e => { if (e.pointerType === 'mouse') setHover(i); }}
+                onPointerLeave={e => { if (e.pointerType === 'mouse') setHover(null); }}
+                style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-5)', padding: 'var(--space-2) 0', cursor: 'pointer', background: shown === i ? 'var(--hairline)' : 'transparent', borderRadius: 'var(--radius-sm)' }}>
+                {/* The keyboard's way in, as its own button: the row holds the
+                    play and download buttons, and a row that was a button
+                    itself would nest them. */}
+                <button type="button" onClick={() => togglePin(t)} aria-expanded={pinnedAt === i}
+                  title="Show this turn's detail"
+                  style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontFamily: mono, fontSize: 'var(--fs-xs)', color: 'var(--muted)', minWidth: '8ch', flexShrink: 0, textAlign: 'right', whiteSpace: 'nowrap' }}>{time}</button>
                 <div style={{ flex: 1, display: 'flex', height: 14, alignItems: 'stretch' }}>
                   {TURN_STAGES.map(s => seg[s.key] > 0 && (
                     <div key={s.key} style={{
@@ -1338,9 +1401,9 @@ function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMis
                     }}/>
                   ))}
                 </div>
-                <span style={{ fontFamily: mono, fontSize: 'var(--fs-xs)', color: 'var(--text2)', width: 34, flexShrink: 0 }}>{fmtS(seg.shown)}</span>
-                <span style={{ fontFamily: mono, fontSize: 'var(--fs-2xs)', textTransform: 'uppercase', letterSpacing: 'var(--tracking-label)', width: '18ch', whiteSpace: 'nowrap', flexShrink: 0, color: failed ? 'var(--warn)' : 'var(--ok)' }}>
-                  {t.outcome === 'ok' ? 'ok' : (t.outcome || '?').replace(/_/g, ' ')}
+                <span style={{ fontFamily: mono, fontSize: 'var(--fs-xs)', color: 'var(--text2)', width: '6ch', flexShrink: 0 }}>{fmtS(seg.shown)}</span>
+                <span style={{ fontFamily: mono, fontSize: 'var(--fs-2xs)', textTransform: 'uppercase', letterSpacing: 'var(--tracking-label)', width: '20ch', whiteSpace: 'nowrap', flexShrink: 0, color: failed ? 'var(--warn)' : 'var(--ok)' }}>
+                  {_outcomeLabel(t.outcome)}
                 </span>
                 {/* Saved utterance: listen in place, or download the WAV.
                     The slot is reserved even when a turn has no recording so
@@ -1361,14 +1424,14 @@ function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMis
           })}
           </div>
 
-          {/* Hover detail */}
-          {hover != null && recent[hover] && (() => {
-            const t = recent[hover]; const seg = turnSegments(t);
+          {/* Detail: the hovered turn, else the tapped one */}
+          {shown != null && recent[shown] && (() => {
+            const t = recent[shown]; const seg = turnSegments(t);
             return (
               <div style={{ marginTop: 'var(--space-5)', background: 'var(--hairline)', border: '1px solid var(--track)', borderRadius: 'var(--radius-md)', padding: 'var(--space-4) var(--space-6)', fontFamily: mono, fontSize: 'var(--fs-sm)', color: 'var(--text2)', lineHeight: 1.7 }}>
                 <span style={{ color: 'var(--muted)' }}>{t.trigger}</span>
                 {' · '}listening {fmtS(seg.listen)} · transcribe {fmtS(seg.transcribe)} · respond {fmtS(seg.respond)} · total {fmtS(Math.max(t.total_ms, 0))}
-                {t.wake_model ? <><br/>wake {t.wake_model.replace(/\.[a-z]+$/, '').split('/').pop()} score {t.wake_score?.toFixed(3)} (thr {t.wake_threshold?.toFixed(2)}) · noise floor {t.noise_floor?.toFixed(4)}</> : null}
+                {t.wake_model ? <><br/>wake {t.wake_model.replace(/\.[a-z]+$/, '').split('/').pop()} score {t.wake_score?.toFixed(3)} (thr {_thresholdText(t.wake_threshold)}) · noise floor {t.noise_floor?.toFixed(4)}</> : null}
                 {t.underruns != null ? <>{t.wake_model ? ' · ' : <br/>}underruns <span style={{ color: t.underruns > 0 ? 'var(--warn)' : 'inherit' }}>{t.underruns}</span></> : null}
                 {t.stt_text ? <><br/>“{t.stt_text.length > 90 ? t.stt_text.slice(0, 90) + '…' : t.stt_text}”</> : null}
               </div>
@@ -1433,8 +1496,15 @@ function ConnectivityTab({ device, row }) {
   const mono  = "var(--font-mono)";
   const busy  = !!pending;
   const seenNet = (networks || []).find(n => n.ssid === ssid && n.ssid_hex);
+  // What the Echo's own scan said about the chosen name, when the firmware
+  // reports security: a typed name is held to it as a picked one is, the
+  // way the wizard's runConfigWifi does.
+  const pickedSec = _scanSecurity((networks || []).find(n => n.ssid === ssid)?.flags);
   const inputProblem = ssid
     ? (_ssidProblem(seenNet ? _hexBytes(seenNet.ssid_hex) : new TextEncoder().encode(ssid))
+       || (pickedSec?.blocker ? `Cannot join “${ssid}”: ${pickedSec.blocker}` : null)
+       || (pickedSec?.security === 'wpa2' && !psk ? `“${ssid}” needs a passphrase.` : null)
+       || (pickedSec?.security === 'open' && psk ? `“${ssid}” is an open network: leave the passphrase blank.` : null)
        || _pskProblem(psk))
     : null;
   const valid = !!ssid && !inputProblem;
@@ -1470,6 +1540,8 @@ function ConnectivityTab({ device, row }) {
       <div className="em-grid2" style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'var(--space-8)', alignItems:'start' }}>
         <Panel label="Current connection">
           {row('Network', currentSsid || '—')}
+          {row('Band', wifiBand(s?.wifiFreqMhz)
+            ? `${wifiBand(s.wifiFreqMhz)} · ${s.wifiFreqMhz} MHz` : '—')}
           {row('IP', device.ip && device.ip !== '127.0.0.1' ? device.ip : '—')}
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
             <span style={{ fontFamily:mono, fontSize:'var(--fs-sm)', color:'var(--muted)', textTransform:'uppercase', letterSpacing:'var(--tracking-label)' }}>Signal</span>
@@ -1493,15 +1565,46 @@ function ConnectivityTab({ device, row }) {
           )}
           {networks && networks.length > 0 && (
             <div style={{ maxHeight:170, overflowY:'auto' }}>
-              {networks.map(n => (
-                <div key={n.ssid} {...asButton(() => !busy && setSsid(n.ssid), { pressed: ssid === n.ssid, disabled: busy })}
-                  style={{ display:'flex', justifyContent:'space-between', alignItems:'center', padding:'var(--space-2) var(--space-4)', borderRadius:'var(--radius-md)', cursor: busy ? 'default' : 'pointer', background: ssid === n.ssid ? 'rgba(64,88,120,0.12)' : 'transparent' }}>
-                  <span title={n.ssid} style={{ fontFamily:mono, fontSize:'var(--fs-md)', color: ssid === n.ssid ? 'var(--accent)' : 'var(--text)', ..._ROW_TEXT }}>
-                    {n.ssid}{n.ssid === currentSsid ? '  ← current' : ''}
-                  </span>
-                  <span style={{ fontFamily:mono, fontSize:'var(--fs-sm)', color:'var(--muted)', ..._ROW_SIDE }}>{n.signal} dBm</span>
+              {networks.map(n => {
+                // Band and security come from firmware that reports freqs and
+                // flags; from older firmware a network shows name and signal
+                // only, never a guess. One the Echo cannot join stays listed
+                // with the reason, as in the wizard's picker, greyed by colour
+                // rather than opacity so its text stays readable.
+                const sec = _scanSecurity(n.flags);
+                const blocked = sec?.blocker || null;
+                const picked = ssid === n.ssid;
+                return (
+                <div key={n.ssid} {...asButton(() => { if (!busy && !blocked) setSsid(n.ssid); }, { pressed: picked, disabled: busy || !!blocked })}
+                  title={blocked || undefined}
+                  style={{ padding:'var(--space-2) var(--space-4)', borderRadius:'var(--radius-md)', cursor: busy ? 'default' : blocked ? 'not-allowed' : 'pointer', background: picked ? 'rgba(64,88,120,0.12)' : 'transparent' }}>
+                  {/* Wraps: on a phone the band and security drop under the
+                      name rather than widening the column past the screen. */}
+                  <div style={{ display:'flex', flexWrap:'wrap', columnGap:'var(--space-5)', alignItems:'center' }}>
+                    <span title={n.ssid} style={{ fontFamily:mono, fontSize:'var(--fs-md)', color: blocked ? 'var(--muted)' : picked ? 'var(--accent)' : 'var(--text)', ..._ROW_TEXT }}>
+                      {n.ssid}{n.ssid === currentSsid ? '  ← current' : ''}
+                    </span>
+                    <span style={{ fontFamily:mono, fontSize:'var(--fs-sm)', color:'var(--muted)', ..._ROW_SIDE, marginLeft:'auto' }}>
+                      {[sec?.label, _scanBands(n.freqs), `${n.signal} dBm`].filter(Boolean).join(' · ')}
+                    </span>
+                  </div>
+                  {blocked && (
+                    <div style={{ fontFamily:'var(--font-sans)', fontSize:'var(--fs-xs)', color:'var(--muted)', lineHeight:1.4 }}>{blocked}</div>
+                  )}
                 </div>
-              ))}
+                );
+              })}
+            </div>
+          )}
+          {/* Said only when the scan reports bands and none is 5 GHz, which is
+              the case that reads as "this Echo cannot do 5 GHz". It can; what
+              it cannot do is see a channel its driver's region leaves out. */}
+          {networks && networks.some(n => Array.isArray(n.freqs) && n.freqs.length)
+            && !networks.some(n => (n.freqs || []).some(f => f >= 4900)) && (
+            <div className="em-field__help" style={{ marginTop:'var(--space-4)', marginBottom:0 }}>
+              No 5 GHz network was seen. This Echo can join 5 GHz, but only on the
+              channels its WiFi driver allows; a router on another 5 GHz channel
+              does not appear here.
             </div>
           )}
         </Panel>
@@ -1552,10 +1655,274 @@ function ConnectivityTab({ device, row }) {
   );
 }
 
+// ─── Home tab ─────────────────────────────────────────────────────────────────
+// The first thing an Echo's window shows: is it up and if not why, how its
+// WiFi is doing, what wakes it and how often that turned out to be nothing,
+// its volume and ring, and whether anything needs updating. Built only from
+// what the controller already serves; each card names the tab with the
+// detail.
+
+// Turn totals over GET /api/devices/{id}/activity. days=1 is the last 24
+// hours bucketed by LOCAL day, so a window across midnight arrives as two
+// buckets and they are summed. Null when there is no answer, which is shown
+// as unknown: zero would claim a quiet day nobody measured.
+function _activityTotals(activity) {
+  const days = activity && Array.isArray(activity.days) ? activity.days : null;
+  if (!days) return null;
+  const out = { turns: 0, ok: 0, heardNothing: 0 };
+  for (const d of days) {
+    out.turns += d.turns || 0;
+    out.ok += d.ok || 0;
+    out.heardNothing += (d.outcomes && d.outcomes.no_speech) || 0;
+  }
+  return out;
+}
+
+// A turn outcome in words. no_speech is a turn that opened and heard nothing
+// said, which after a wake word is usually a false wake.
+function _outcomeLabel(outcome) {
+  if (outcome === 'no_speech') return 'heard nothing';
+  return (outcome || '?').replace(/_/g, ' ');
+}
+
+// An epoch-seconds time on the wall clock: the time alone for today, with
+// the date otherwise.
+function _clockTime(ts) {
+  const d = new Date(ts * 1000);
+  const today = d.toDateString() === new Date().toDateString();
+  return d.toLocaleString([], today
+    ? { hour: '2-digit', minute: '2-digit' }
+    : { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+// Why the control link last closed, from `lastDisconnect` ({at, why,
+// routine}). A controller from before the field sends nothing, and then this
+// is null and only last seen is shown: a guessed reason is worse than none.
+// `at` arrives in epoch MILLISECONDS (em_device_view.note_disconnect), unlike
+// last_seen, and is returned in seconds for relTime and _clockTime: read as
+// seconds it put the drop 55,000 years ahead.
+function _lastDrop(device) {
+  const ld = device.lastDisconnect;
+  if (!ld || !ld.why) return null;
+  return { at: ld.at ? ld.at / 1000 : null, why: ld.routine ? `${ld.why} (routine)` : ld.why };
+}
+
+// Whether Home Assistant is on the other end of this Echo's voice port
+// (#349). Amber rather than red while it is not: HA reconnects by itself
+// from most of the ways this happens, and a row that shouts through an
+// ordinary restart is one people learn to skip (#301).
+function _voiceSatelliteRow(device) {
+  const vs = device.voiceSatellite;
+  const p  = vs?.port ?? device.esphome_port;
+  const at = p != null ? ` · port ${p}` : '';
+  if (!vs)            return { text: 'No satellite server', color: 'var(--error)' };
+  if (vs.haConnected) return { text: `HA connected${at}`, color: 'var(--ok)' };
+  if (vs.listening)   return { text: `Waiting for HA${at}`, color: 'var(--warn)' };
+  return { text: `Port down${at}`, color: 'var(--warn)' };
+}
+
+// Where the wake word is scored, from what the Echo REPORTS (em_listen):
+// configuration is what was asked for, the report is what is happening, and
+// only the report is stated as fact. Null while there is no report.
+function _wakeWhere(device) {
+  const l = device.connected ? device.listen : null;
+  if (!l) return null;
+  switch (l.state) {
+    case 'local':      return 'On this Echo';
+    case 'controller': return 'On the controller, streaming';
+    case 'diagnostic': return 'Both, diagnostic, streaming';
+    // "On this Echo" asked of firmware that cannot listen privately: it
+    // streams either way, and is scored where em_listen.detector says.
+    case 'legacy':     return device.owwTriggerCapable
+                         ? 'On this Echo, streaming' : 'On the controller, streaming';
+    case 'degraded':   return 'Nowhere: button only';
+    default:           return l.streams ? 'Switching, streaming' : 'Not reported yet';
+  }
+}
+
+// A wake threshold as stored, without the padding toFixed adds.
+function _thresholdText(t) {
+  return t == null ? '—' : String(Number(Number(t).toFixed(3)));
+}
+
+// owwPatience as it applies to this Echo, or null where the config has no
+// such key (a controller from before it). The controller applies it to every
+// wake it decides; an Echo deciding its own applies it only on firmware
+// announcing oww_patience, so a stored value there is not what happens. The
+// Echo decides only in "on" with both oww_shadow and oww_trigger
+// (em_shadow.effective_mode). Offline it cannot be told, and the setting is
+// shown as set, as the Config form treats it.
+function _patienceText(cfg, device) {
+  const n = cfg.owwPatience;
+  if (n == null) return null;
+  const frames = `${n} frame${n === 1 ? '' : 's'}`;
+  const echoDecides = !!device.connected && onDeviceMode(cfg) === 'on'
+    && !!device.owwShadowCapable && !!device.owwTriggerCapable;
+  return echoDecides && !device.owwPatienceCapable
+    ? { text: `${frames}, not applied by this firmware`, applied: false }
+    : { text: frames, applied: true };
+}
+
+function HomeCard({ title, headline, tone, children, links }) {
+  return (
+    <Panel label={title} style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+      <div style={{ fontFamily: 'var(--font-sans)', fontSize: 'var(--fs-lg)', fontWeight: 600,
+                    color: tone || 'var(--text)', marginBottom: 'var(--space-4)', overflowWrap: 'anywhere' }}>
+        {headline}
+      </div>
+      <div style={{ flex: 1 }}>{children}</div>
+      {links && links.length > 0 && (
+        <div style={{ display: 'flex', gap: 'var(--space-8)', flexWrap: 'wrap', marginTop: 'var(--space-6)',
+                      paddingTop: 'var(--space-4)', borderTop: '1px solid var(--hairline)' }}>
+          {links.map(([label, go]) => (
+            <button key={label} type="button" className="em-linkbtn" onClick={go}>{label} →</button>
+          ))}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function HomeTab({ device, globalConfig, release, ctrlRelease, activity, isAdmin, onGo }) {
+  const s   = device.stats || null;
+  const lq  = device.linkQuality;
+  const cfg = effectiveConfig(globalConfig, device);
+  const link = _linkRow(device);
+  const drop = _lastDrop(device);
+  const ha   = _voiceSatelliteRow(device);
+  const totals = _activityTotals(activity);
+  const where  = _wakeWhere(device);
+  const patience = _patienceText(cfg, device);
+
+  const row = (k, v, c, title) => (
+    <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: 'var(--space-6)', alignItems: 'baseline',
+                  padding: 'var(--space-3) 0', borderBottom: '1px solid var(--hairline)' }}>
+      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-sm)', color: 'var(--muted)', whiteSpace: 'nowrap' }}>{k}</span>
+      <span title={title} style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-md)', color: c || 'var(--text)',
+                                   textAlign: 'right', overflowWrap: 'anywhere', minWidth: 0 }}>{v}</span>
+    </div>
+  );
+  const note = text => (
+    <div className="em-field__help" style={{ marginTop: 'var(--space-4)', marginBottom: 0 }}>{text}</div>
+  );
+
+  const connHead = link.refused ? 'Refused' : device.connected ? 'Online' : 'Offline';
+  const connTone = link.refused ? 'var(--error)' : device.connected ? 'var(--ok)' : 'var(--warn)';
+
+  // Graded on packet loss, not signal, as the Status tab's Link tile is:
+  // full bars over a link that is losing frames still reads Poor.
+  const band = wifiBand(s?.wifiFreqMhz);
+  const lossTone = lq?.verdict === 'poor' ? 'var(--error)' : lq?.verdict === 'fair' ? 'var(--warn)'
+    : lq?.verdict === 'good' ? 'var(--ok)' : undefined;
+  const wifiHead = !device.connected ? 'Not connected'
+    : !s ? 'Waiting for stats'
+    : lq?.verdict ? `${LINK_VERDICT[lq.verdict] || lq.verdict} link` : 'Measuring link';
+
+  const wakeOff = device.wake_word === false;
+  const custom  = (cfg.owwModel || '').endsWith('.onnx');
+  const heard   = !totals ? '—' : totals.turns > 0 ? `${totals.heardNothing} of ${totals.turns}` : 'No turns';
+  const heardTone = totals && totals.heardNothing > totals.ok ? 'var(--warn)' : undefined;
+
+  // Volume is the Echo's own state, set from Home Assistant or its buttons;
+  // the dashboard only reports it (device/CLAUDE.md).
+  const vol = device.volume != null ? `${Math.round(device.volume * 100)}%`
+    : s?.volumePct != null ? `${s.volumePct}%` : '—';
+  const scene = cfg.ledScene ? cfg.ledScene.charAt(0).toUpperCase() + cfg.ledScene.slice(1) : '—';
+
+  // "Up to date" needs an offered version to be up to date WITH; with no
+  // release info it says so rather than reassuring.
+  const fw = device.update_in_progress ? { text: 'Updating…', tone: 'busy' }
+    : device.update_queued ? { text: 'Queued', tone: 'busy' }
+    : device.update_error ? { text: `Failed: ${device.update_error}`, tone: 'bad' }
+    : device.firmware_update ? { text: `${release?.version || 'Newer'} available`, tone: 'warn' }
+    : release?.version ? { text: 'Up to date', tone: 'ok' }
+    : { text: 'No release info', tone: 'unknown' };
+  const emos = device.baseOs !== 'emos' ? null
+    : device.emos_update_in_progress ? { text: device.emos_update_stage || 'Updating…', tone: 'busy' }
+    : device.emos_update_queued ? { text: 'Queued', tone: 'busy' }
+    : device.emos_update_error ? { text: `Failed: ${device.emos_update_error}`, tone: 'bad' }
+    : device.emosUpdateAvailable ? { text: `${_emosLabel(device.emosLatest)} available`, tone: 'warn' }
+    : device.emosOffer === 'current' ? { text: 'Up to date', tone: 'ok' }
+    : device.emosOffer === 'wizard' ? { text: `${_emosLabel(device.emosLatest)} installs with the wizard`, tone: 'unknown' }
+    : { text: device.emosVersion ? 'No release info' : 'Version not read yet', tone: 'unknown' };
+  // version.compare's status: 'current' covers a build ahead of the tag,
+  // and a dev build is 'unknown', which must not read as up to date.
+  const ctrl = ctrlRelease?.available && ctrlRelease.version ? { text: `${ctrlRelease.version} available`, tone: 'warn' }
+    : ctrlRelease?.status === 'current' ? { text: 'Up to date', tone: 'ok' }
+    : { text: ctrlRelease?.status === 'unknown' && ctrlRelease.version ? 'Version not comparable' : 'No release info', tone: 'unknown' };
+  const UPD_COLOR = { busy: 'var(--accent)', bad: 'var(--error)', warn: 'var(--warn)', ok: 'var(--ok)', unknown: 'var(--muted)' };
+  const upd = [fw, emos, ctrl].filter(Boolean);
+  const has = t => upd.some(p => p.tone === t);
+  const [updHead, updTone] = has('bad') ? ['An update failed', 'bad']
+    : has('busy') ? ['Updating', 'busy']
+    : has('warn') ? ['Update available', 'warn']
+    : upd.every(p => p.tone === 'ok') ? ['Up to date', 'ok'] : ['Not fully known', 'unknown'];
+
+  return (
+    <div style={{ display: 'grid', gap: 'var(--space-8)', alignItems: 'stretch',
+                  gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 300px), 1fr))' }}>
+      <HomeCard title="Connection" headline={connHead} tone={connTone}
+        links={[['Status', () => onGo('status')], ['Logs', () => onGo('logs')]]}>
+        {!device.connected && row('Last seen',
+          device.last_seen ? `${relTime(device.last_seen)} · ${_clockTime(device.last_seen)}` : '—')}
+        {drop && row(device.connected ? 'Last drop' : 'Why',
+          device.connected && drop.at ? `${relTime(drop.at)} · ${drop.why}` : drop.why,
+          device.connected ? undefined : 'var(--warn)',
+          drop.at ? _clockTime(drop.at) : undefined)}
+        {row('Link', link.label, link.color)}
+        {row('Home Assistant', ha.text, ha.color)}
+      </HomeCard>
+
+      <HomeCard title="WiFi" headline={wifiHead} tone={lossTone}
+        links={[['Link detail', () => onGo('status')], ['Change network', () => onGo('config')]]}>
+        {row('Network', s?.wifiSsid || '—')}
+        {row('Band', band ? `${band}${s?.wifiFreqMhz ? ` · ${s.wifiFreqMhz} MHz` : ''}` : '—')}
+        {row('Signal', s?.wifiRssi != null
+          ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--space-3)' }}>
+              {s.wifiRssi} dBm<SignalBars rssi={s.wifiRssi}/>
+            </span>
+          : '—')}
+        {row('Loss', lq?.lossPct != null ? `${lq.lossPct}%` : '—', lossTone)}
+        {row('Latency', device.rttMs != null ? `${device.rttMs} ms` : '—',
+             device.rttMs == null ? undefined : device.rttMs >= 1000 ? 'var(--error)'
+               : device.rttMs >= 200 ? 'var(--warn)' : undefined)}
+      </HomeCard>
+
+      <HomeCard title="Wake word" headline={wakeOff ? 'Off in Home Assistant' : wwModelLabel(cfg.owwModel)}
+        tone={wakeOff ? 'var(--warn)' : undefined}
+        links={[['Activity', () => onGo('activity')], ['Settings', () => onGo('config')]]}>
+        {row('Model', custom ? `${wwModelLabel(cfg.owwModel)} (custom)` : wwModelLabel(cfg.owwModel),
+             undefined, cfg.owwModel || undefined)}
+        {row('Threshold', _thresholdText(cfg.owwThreshold))}
+        {patience && row('Patience', patience.text, patience.applied ? undefined : 'var(--muted)')}
+        {row('Scored', where || (device.connected ? 'Not reported yet' : 'Not reported while offline'))}
+        {row('Heard nothing · 24 h', heard, heardTone,
+             'Turns that opened and heard nothing said. After a wake word that is usually a false wake.')}
+        {totals && totals.turns > 0 && row('Answered · 24 h', String(totals.ok))}
+      </HomeCard>
+
+      <HomeCard title="Volume and ring" headline={vol}
+        links={[['Ring settings', () => onGo('config')]]}>
+        {row('Volume', device.connected || vol === '—' ? vol : `${vol} (last reported)`)}
+        {row('LED scene', scene)}
+        {note('Volume belongs to the Echo: change it from Home Assistant or its buttons.')}
+      </HomeCard>
+
+      <HomeCard title="Updates" headline={updHead} tone={UPD_COLOR[updTone]}
+        links={isAdmin ? [['Updates', () => onGo('updates')]] : []}>
+        {row('Firmware', fw.text, UPD_COLOR[fw.tone], device.firmware_ver || undefined)}
+        {emos && row('emOS', emos.text, UPD_COLOR[emos.tone], device.emosVersion || undefined)}
+        {row('Controller', ctrl.text, UPD_COLOR[ctrl.tone], ctrlRelease?.current || undefined)}
+      </HomeCard>
+    </div>
+  );
+}
+
 // ─── Device detail modal ──────────────────────────────────────────────────────
 
-function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDeviceConfigChange }) {
-  const [tab, setTab] = useState(() => device.approved ? 'status' : 'approve');
+function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDeviceConfigChange,
+                  onGlobalConfigChange, soloFleet = false, emosFleet = true, ctrlRelease }) {
+  const [tab, setTab] = useState(() => device.approved ? 'home' : 'approve');
   // Seed from the EFFECTIVE config, not the raw stored one — see
   // effectiveConfig(). A migrated row's stored dict is not the truth.
   const [config, setConfig] = useState(() => effectiveConfig(globalConfig, device));
@@ -1601,14 +1968,29 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
   const [assetResult, setAssetResult] = useState(null);
   const fileInputRef = useRef(null);
   const [turns, setTurns] = useState([]);
+  // The last 24 hours from the turns table (GET .../activity?days=1), for
+  // Home and Activity. DB-backed, unlike owwNearMisses, which lives on the
+  // connection and restarts at zero with every reconnect.
+  const [activity24, setActivity24] = useState(null);
   const state = deviceState(device);
   const needsUpdate = !!device.firmware_update;
 
+  const devTools = useDevTools();
   const TABS = device.approved
-    ? (isAdmin ? ['status', 'activity', 'config', 'console', 'updates', 'logs'] : ['status', 'activity', 'config', 'logs'])
+    ? (isAdmin
+        ? ['home', 'status', 'activity', 'config', ...(devTools ? ['console'] : []), 'updates', 'logs']
+        : ['home', 'status', 'activity', 'config', 'logs'])
     : ['approve'];
+  // A tab that stops existing while it is open (developer tools switched off
+  // in another window) falls back to the first rather than rendering blank.
+  useEffect(() => {
+    if (!TABS.includes(tab)) setTab(TABS[0]);
+  }, [TABS.join(',')]);
 
   useEffect(() => {
+    if (tab === 'home') {
+      API.get('/api/releases/latest').then(setRelease).catch(() => {});
+    }
     if (tab === 'logs') {
       setLogsLoading(true);
       API.get(`/api/devices/${device.device_id}/logs?limit=50`)
@@ -1662,7 +2044,56 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
     return () => { live = false; clearInterval(iv); };
   }, [tab, device.device_id]);
 
+  // A minute between polls: it aggregates a day of turns server-side, and a
+  // day's count does not move faster than that matters.
+  useEffect(() => {
+    if (tab !== 'home' && tab !== 'activity') return;
+    let live = true;
+    const load = () => API.get(`/api/devices/${device.device_id}/activity?days=1`)
+      .then(a => { if (live) setActivity24(a); })
+      .catch(() => {});
+    load();
+    const iv = setInterval(load, 60000);
+    return () => { live = false; clearInterval(iv); };
+  }, [tab, device.device_id]);
+
   function setConf(k, v) { setConfig(c => ({ ...c, [k]: v })); setDirty(true); }
+
+  // One Echo has no fleet to differ from, so its Config tab edits the fleet
+  // config itself, through the same save as Settings, with no Scope
+  // switches. Only while it overrides nothing: a fleet edit to a section a
+  // device overrides saves, says pushed, and changes nothing on that device
+  // (#857), so an Echo with overrides keeps the scoped form and its Revert
+  // all to fleet until it is back on the fleet.
+  const solo = soloFleet && device.approved && !!globalConfig
+    && (device.config_sections ?? []).length === 0;
+  const [fleetCfg, setFleetCfg]     = useState(() => ({ ...(globalConfig || {}) }));
+  const [fleetDirty, setFleetDirty] = useState(false);
+  const [fleetMsg, setFleetMsg]     = useState(null);   // {ok, text}
+  // An edit made while a save is in flight is not saved by that save's reply
+  // (SettingsPanel's UAT 2026-09-27 fault).
+  const fleetEditedDuringSave = useRef(false);
+  useEffect(() => {
+    if (!fleetDirty && globalConfig) setFleetCfg({ ...globalConfig });
+  }, [globalConfig]);
+  function setFleetConf(k, v) {
+    setFleetCfg(c => ({ ...c, [k]: v })); setFleetDirty(true); setFleetMsg(null);
+    fleetEditedDuringSave.current = true;
+  }
+  async function saveFleetConfig() {
+    setSaving(true);
+    fleetEditedDuringSave.current = false;
+    try {
+      const res = await API.post('/api/global/config', fleetCfg);
+      if (onGlobalConfigChange) onGlobalConfigChange(fleetCfg);
+      setFleetDirty(fleetEditedDuringSave.current);
+      const n = res.pushed_to?.length ?? 0;
+      setFleetMsg({ ok: true, text: n > 0 ? 'Saved and pushed live' : 'Saved' });
+    } catch (e) {
+      setFleetMsg({ ok: false, text: e.error || 'Failed to save config' });
+    }
+    setSaving(false);
+  }
 
   async function doCheckRelease() {
     setCheckingRelease(true);
@@ -2026,7 +2457,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
       {/* Fixed height (not maxHeight): every tab renders in an identical
           frame — content scrolls inside, the window never resizes as you
           move between tabs. */}
-      <div className="em-modal" style={{ width: 'min(900px,95vw)', height: 'min(700px,90vh)', background: 'linear-gradient(170deg,var(--raised),var(--surface))', border: '1px solid var(--border)', borderRadius: 'var(--radius-dialog)', boxShadow: '0 24px 80px rgba(0,0,0,0.3),0 2px 0 var(--sheen) inset', display: 'flex', flexDirection: 'column', overflow: 'hidden', animation: 'fadeIn 0.15s ease' }}>
+      <div className="em-modal" style={{ width: 'min(1120px,96vw)', height: 'min(880px,92vh)', background: 'linear-gradient(170deg,var(--raised),var(--surface))', border: '1px solid var(--border)', borderRadius: 'var(--radius-dialog)', boxShadow: '0 24px 80px rgba(0,0,0,0.3),0 2px 0 var(--sheen) inset', display: 'flex', flexDirection: 'column', overflow: 'hidden', animation: 'fadeIn 0.15s ease' }}>
         {/* Header */}
         <div className="em-modal-head" style={{ background: 'linear-gradient(180deg,var(--card),var(--bg))', borderBottom: '1px solid var(--border-hard)', padding: 'var(--space-10) var(--space-12) 0', boxShadow: '0 1px 0 var(--sheen) inset' }}>
           <div className="em-modal-headrow" style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-10)', marginBottom: 'var(--space-8)' }}>
@@ -2158,6 +2589,12 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
             </div>
           )}
 
+          {/* HOME */}
+          {tab === 'home' && (
+            <HomeTab device={device} globalConfig={globalConfig} release={release}
+              ctrlRelease={ctrlRelease} activity={activity24} isAdmin={isAdmin} onGo={setTab}/>
+          )}
+
           {/* STATUS */}
           {tab === 'status' && (() => {
             const s = device.stats || null;
@@ -2212,24 +2649,10 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                         The port stays, appended: it is what a stale HA config
                         entry is keyed on, so it is the first thing needed the
                         moment this row says Waiting. */}
-                    {row('Voice assistant', (() => {
-                      const vs = device.voiceSatellite;
-                      const p  = vs?.port ?? device.esphome_port;
-                      const at = p != null ? ` · port ${p}` : '';
-                      if (!vs)            return 'No satellite server';
-                      if (vs.haConnected) return `HA connected${at}`;
-                      if (vs.listening)   return `Waiting for HA${at}`;
-                      return `Port down${at}`;
-                    })(), (() => {
-                      const vs = device.voiceSatellite;
-                      // Not-connected is amber rather than red: HA reconnects
-                      // on its own from most of the ways this happens, and a
-                      // row that shouts during an ordinary restart is one
-                      // people learn to skip past — the #301 cry-wolf rule.
-                      if (!vs)            return 'var(--error)';
-                      if (vs.haConnected) return 'var(--ok)';
-                      return 'var(--warn)';
-                    })())}
+                    {(() => {
+                      const vs = _voiceSatelliteRow(device);
+                      return row('Voice assistant', vs.text, vs.color);
+                    })()}
                     {/* One row, not two. "Connected: Yes" plus "Last seen"
                         was redundant in both directions — while connected the
                         last-seen time says nothing, and while offline the
@@ -2390,13 +2813,15 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
             const wwLabel = wwModelLabel(cfgEff.owwModel);
             return (
               <div style={{ minHeight:'100%', display:'flex', flexDirection:'column' }}>
-                <Panel label={`Voice activity — ${wwLabel} @ ${cfgEff.owwThreshold != null ? cfgEff.owwThreshold.toFixed(2) : '—'}`} style={{ flex:1 }}>
+                {/* The threshold as stored: toFixed(2) showed 0.175 as 0.17. */}
+                <Panel label={`Voice activity · ${wwLabel} @ ${_thresholdText(cfgEff.owwThreshold)}`} style={{ flex:1 }}>
                   <TurnObservability
                     turns={turns}
                     deviceId={device.device_id}
                     deviceLabel={device.label}
                     recordingsOn={cfgEff.saveUtterances}
                     nearMisses={device.owwNearMisses}
+                    day={_activityTotals(activity24)}
                     stateLabel={state.label.toUpperCase()}
                     stateColor={state.lcd}
                     isAdmin={isAdmin}
@@ -2415,6 +2840,62 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 <ConnectivityTab device={device} row={row}/>
               </div>
 
+              {(() => {
+                // What this Echo can do, whichever config the form edits: a
+                // control its firmware lacks is disabled with the reason
+                // either way.
+                const caps = {
+                  shadowCapable: !device.connected || !!device.owwShadowCapable,
+                  triggerCapable: !device.connected || !!device.owwTriggerCapable,
+                  localCapable: !device.connected || !!device.owwLocalCapable,
+                  listen: device.connected ? device.listen : null,
+                  wakeCueCapable: !device.connected || !!device.wakeCueCapable,
+                  volumeCueCapable: !device.connected || !!device.volumeCueCapable,
+                  remoteVolumeArcCapable: !device.connected || !!device.remoteVolumeArcCapable,
+                  responseLevelCapable: !device.connected || !!device.responseLevelCapable,
+                  wakeMicCapable: !device.connected || !!device.wakeMicCapable,
+                  // For the owwPatience control; nothing reads it on a
+                  // controller without that key.
+                  patienceCapable: !device.connected || !!device.owwPatienceCapable,
+                  sendspinCapable: !device.connected || !!device.sendspinCapable,
+                  sendspinPanel: device.connected && device.sendspinCapable
+                    ? <SendspinPairing deviceId={device.device_id} status={device.sendspin} isAdmin={isAdmin}/>
+                    : null,
+                  bleConnectCapable: !device.connected || !!device.bleConnectCapable,
+                  blePanel: device.connected && device.bleConnectCapable
+                    ? <BleProxyKey deviceId={device.device_id} status={device.bleProxy} isAdmin={isAdmin}/>
+                    : null,
+                  mixCapable: !device.connected || !!device.audioMixCapable,
+                  holdCapable: !device.connected || !!device.buttonHoldCapable,
+                  hwRefCapable: !device.connected || !!device.aecHwRefCapable,
+                };
+                if (solo) return (
+                  <>
+                    <div className="em-field__help" style={{ marginBottom: 'var(--space-8)' }}>
+                      This is the only Echo, so these are the fleet settings. Another Echo added later starts from them.
+                    </div>
+                    <DeviceConfigForm config={fleetCfg} onChange={setFleetConf} disabled={!isAdmin}
+                      emosFleet={emosFleet}
+                      {...caps} hwEchoRef={device.connected && device.aecRef === 'hw'}/>
+                    {isAdmin && fleetDirty && (
+                      <div style={{ display: 'flex', gap: 'var(--space-5)', marginTop: 'var(--space-12)' }}>
+                        <Pill accent disabled={saving} onClick={saveFleetConfig}>
+                          {saving ? 'Saving…' : 'Save'}
+                        </Pill>
+                        <Pill onClick={() => { setFleetCfg({ ...globalConfig }); setFleetDirty(false); setFleetMsg(null); }}>
+                          Cancel
+                        </Pill>
+                      </div>
+                    )}
+                    {fleetMsg && (
+                      <div style={{ marginTop: 'var(--space-7)', fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-md)',
+                                    color: fleetMsg.ok ? 'var(--ok)' : 'var(--error)' }}>
+                        {fleetMsg.ok ? '✓ ' : ''}{fleetMsg.text}
+                      </div>
+                    )}
+                  </>
+                );
+                return (<>
               {/* Scoping summary. Each section below carries its own
                   Fleet/Device switch — this is just the roll-up plus a way
                   back to fully inheriting. */}
@@ -2451,28 +2932,8 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 onChange={(k, v) => setConf(k, v)}
                 disabled={!isAdmin}
                 sections={sections}
-                shadowCapable={!device.connected || !!device.owwShadowCapable}
-                triggerCapable={!device.connected || !!device.owwTriggerCapable}
-                localCapable={!device.connected || !!device.owwLocalCapable}
-                listen={device.connected ? device.listen : null}
-                wakeCueCapable={!device.connected || !!device.wakeCueCapable}
-                volumeCueCapable={!device.connected || !!device.volumeCueCapable}
-                remoteVolumeArcCapable={!device.connected || !!device.remoteVolumeArcCapable}
-                responseLevelCapable={!device.connected || !!device.responseLevelCapable}
-                wakeMicCapable={!device.connected || !!device.wakeMicCapable}
-                patienceCapable={!device.connected || !!device.owwPatienceCapable}
-                sendspinCapable={!device.connected || !!device.sendspinCapable}
-                sendspinPanel={device.connected && device.sendspinCapable
-                  ? <SendspinPairing deviceId={device.device_id} status={device.sendspin} isAdmin={isAdmin}/>
-                  : null}
-                bleConnectCapable={!device.connected || !!device.bleConnectCapable}
-                blePanel={device.connected && device.bleConnectCapable
-                  ? <BleProxyKey deviceId={device.device_id} status={device.bleProxy} isAdmin={isAdmin}/>
-                  : null}
-                mixCapable={!device.connected || !!device.audioMixCapable}
-                holdCapable={!device.connected || !!device.buttonHoldCapable}
+                {...caps}
                 hwEchoRef={device.connected && device.aecRef === 'hw'}
-                hwRefCapable={!device.connected || !!device.aecHwRefCapable}
                 onScopeChange={(id, local) => {
                   setSections(prev => local
                     ? [...prev, id]
@@ -2493,6 +2954,8 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                   }}>Cancel</Pill>
                 </div>
               )}
+                </>);
+              })()}
             </div>
           )}
 
@@ -2646,6 +3109,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                     </span>
                   </div>
                   {/* The developer path, as Local Build is for firmware. */}
+                  {devTools && (
                   <div style={{ display:'flex', gap:'var(--space-5)', alignItems:'center', flexWrap:'wrap', marginTop:'var(--space-7)', borderTop:'1px solid var(--hairline)', paddingTop:'var(--space-5)' }}>
                     <input ref={emosFileRef} type="file" accept=".zip" style={{ display:'none' }}
                       onChange={e => setEmosFile(e.target.files[0] || null)}/>
@@ -2668,6 +3132,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                       </span>
                     )}
                   </div>
+                  )}
                 </Panel>
                 );
               })()}
@@ -2676,6 +3141,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                   button, which now lives beside the version state above.
                   Local Build remains as the developer path — correctly
                   secondary, and no longer competing for the top half. */}
+              {devTools && (
               <div className="em-grid2" style={{ display:'grid', gridTemplateColumns:'1fr', gap:'var(--space-8)' }}>
                 <Panel label="Local Build">
                   <div style={{ fontFamily:"var(--font-mono)", fontSize:'var(--fs-sm)', color:'var(--muted)', lineHeight:1.6, marginBottom:'var(--space-7)' }}>
@@ -2701,13 +3167,15 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                   </div>
                 </Panel>
               </div>
+              )}
 
               {/* Maintenance — device-side payloads that are not the firmware
                   binary. These used to sit on the Status tab beside Secure
                   link, which was the wrong home: Status describes what a device
                   IS, and re-applying a payload is something you DO. It belongs
-                  next to deploy and rollback. */}
-              {isAdmin && (
+                  next to deploy and rollback, behind developer tools since the
+                  OTA reapplies it by itself. */}
+              {isAdmin && devTools && (
                 <Panel label="Maintenance">
                   <div style={{ fontFamily:"var(--font-mono)", fontSize:'var(--fs-sm)', color:'var(--muted)', lineHeight:1.6, marginBottom:'var(--space-7)' }}>
                     Re-apply the debloat payloads: sync the boot script and hide any
@@ -3752,6 +4220,61 @@ const _SECURITY_LABEL = {
   wpa2: 'WPA2', wpa3: 'WPA3', open: 'Open', wep: 'WEP', enterprise: 'Enterprise',
 };
 
+// What can this device actually join? Module scope so the wizard and an
+// Echo's Connectivity panel judge a network the same way.
+//
+// Measured on hardware (`wpa_cli get_capability key_mgmt`): NONE,
+// IEEE8021X, WPA-EAP, WPA-PSK. There is no SAE, so WPA3-Personal is not a
+// configuration problem, it is impossible on this radio, hence 'wpa3'
+// being refused outright rather than attempted. emOS's own supplicant is
+// built without SAE as well. Mixed WPA2/WPA3 APs advertise both and are
+// joinable through the WPA2 half.
+function classifySecurity(flags) {
+  const f = (flags || '').toUpperCase();
+  const hasPsk = f.includes('WPA-PSK') || f.includes('WPA2-PSK') || f.includes('PSK');
+  if (f.includes('EAP')) return 'enterprise';
+  if (f.includes('SAE') && !hasPsk) return 'wpa3';
+  if (hasPsk) return 'wpa2';
+  if (f.includes('WEP')) return 'wep';
+  return 'open';
+}
+
+// Why a network cannot be used, or null when it can. Neither the wizard nor
+// the firmware's network change writes anything but a PSK or an open block.
+function securityBlocker(security) {
+  if (security === 'wpa3') {
+    return 'WPA3 only. This Dot has no SAE support, so it cannot join. '
+         + 'Enable WPA2 compatibility mode on the router or hotspot.';
+  }
+  if (security === 'enterprise') {
+    return 'Enterprise (802.1X). EchoMuse cannot configure this.';
+  }
+  if (security === 'wep') {
+    return 'WEP. EchoMuse cannot configure this.';
+  }
+  return null;
+}
+
+// The bands a network from an Echo's own scan was seen on, from `freqs`
+// (every frequency its access points answered on). Null when the scan did
+// not carry them: older firmware reports name and signal only, and a guessed
+// band is worse than none, since the point is telling 2.4 from 5 GHz.
+function _scanBands(freqs) {
+  if (!Array.isArray(freqs) || !freqs.length) return null;
+  const bands = new Set(freqs.map(wifiBand).filter(Boolean));
+  const two = bands.has('2.4GHz'), five = bands.has('5GHz');
+  return two && five ? '2.4 + 5 GHz' : five ? '5 GHz' : two ? '2.4 GHz' : null;
+}
+
+// Security of a scanned network from its wpa_supplicant `flags`, or null
+// when the scan did not carry them (older firmware): unknown is not open.
+function _scanSecurity(flags) {
+  if (typeof flags !== 'string' || !flags) return null;
+  const security = classifySecurity(flags);
+  return { security, label: _SECURITY_LABEL[security] || security,
+           blocker: securityBlocker(security) };
+}
+
 const _MAGISK_FILENAME = 'Magisk-v17.3.zip';
 // f1r30s.zip from R0rt1z2's XDA thread: the one build this flow has been run
 // with. Rooting leaves it on /sdcard; a wipe or a tidy-up removes it, and the
@@ -3810,7 +4333,7 @@ async function _sha256Hex(buf) {
 // 10  wifi             — configure WiFi network                            [inputs]
 // 11  install_em       — push binary + startup script                      [file]
 const _WIZARD_STEPS = [
-  { id: 'connect_android', label: 'Connect Device',     desc: 'Connect the Echo Dot via USB. Device should be on and booted into Android. Appears as "AEOBC" in the USB picker.' },
+  { id: 'connect_android', label: 'Connect Device',     desc: 'Plug the Echo Dot by USB into the computer running this browser (Chrome or Edge), not the Home Assistant host. Device should be on and booted into Android. Appears as "AEOBC" in the USB picker.' },
   { id: 'connect_twrp',    label: 'Connect to TWRP',   desc: 'Wait for TWRP recovery to appear, then reconnect. Appears as "Echo" in the USB picker.' },
   { id: 'patch_boot',      label: 'Patch Boot Image',  desc: 'Apply SELinux permissive patch and add init.rc service entries.' },
   { id: 'install_magisk',  label: 'Install Magisk',    desc: 'Flash Magisk 17.3 for persistent root access.' },
@@ -3880,7 +4403,7 @@ function _wizardLogClass(msg, type) {
 // wpa_supplicant — the real radio, so a network this hardware cannot join is
 // refused at pick time rather than after a flash.
 const _EMOS_STEPS = [
-  { id: 'connect_android', label: 'Connect Device',    desc: 'Connect the Echo Dot via USB. It can be booted into Android or already in TWRP. Appears as "AEOBC" (Android) or "Echo" (TWRP) in the USB picker.' },
+  { id: 'connect_android', label: 'Connect Device',    desc: 'Plug the Echo Dot by USB into the computer running this browser (Chrome or Edge), not the Home Assistant host. It can be booted into Android or already in TWRP. Appears as "AEOBC" (Android) or "Echo" (TWRP) in the USB picker.' },
   { id: 'connect_twrp',    label: 'Connect to TWRP',   desc: 'Wait for the device to reach TWRP, then reconnect — it appears as "Echo" in the USB picker. Everything after this happens there.' },
   { id: 'escrow_boot',     label: 'Escrow Boot Image', desc: 'Read the stock boot partition off the device and keep a copy. This one file is both the build input and your backup if we need to roll back.' },
   { id: 'install_em',      label: 'Install EchoMuse',  desc: 'Push the server binary, startup script and TLS credentials to /data, which survives the boot-partition write.' },
@@ -6226,38 +6749,6 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     return networks;
   }
 
-  // What can this device actually join?
-  //
-  // Measured on hardware (`wpa_cli get_capability key_mgmt`): NONE,
-  // IEEE8021X, WPA-EAP, WPA-PSK. There is no SAE, so WPA3-Personal is not a
-  // configuration problem, it is impossible on this radio — hence 'wpa3'
-  // being refused outright rather than attempted. Mixed WPA2/WPA3 APs
-  // advertise both and are joinable through the WPA2 half.
-  function classifySecurity(flags) {
-    const f = (flags || '').toUpperCase();
-    const hasPsk = f.includes('WPA-PSK') || f.includes('WPA2-PSK') || f.includes('PSK');
-    if (f.includes('EAP')) return 'enterprise';
-    if (f.includes('SAE') && !hasPsk) return 'wpa3';
-    if (hasPsk) return 'wpa2';
-    if (f.includes('WEP')) return 'wep';
-    return 'open';
-  }
-
-  // Why a network cannot be used, or null when it can.
-  function securityBlocker(security) {
-    if (security === 'wpa3') {
-      return 'WPA3 only. This Dot has no SAE support, so it cannot join. '
-           + 'Enable WPA2 compatibility mode on the router or hotspot.';
-    }
-    if (security === 'enterprise') {
-      return 'Enterprise (802.1X). The wizard cannot configure this.';
-    }
-    if (security === 'wep') {
-      return 'WEP. The wizard cannot configure this.';
-    }
-    return null;
-  }
-
   // The exact bytes of the network the operator chose: from the scan when it
   // came from there (an SSID can hold bytes no display shows), otherwise the
   // UTF-8 of what they typed, which is the SSID for any name they can type.
@@ -8154,10 +8645,13 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   // part is the transport, which is why parseScanResults is shared rather than
   // reimplemented.
   //
-  // The flags column is the reason this is worth having at all: this radio
-  // reports no SAE, so a [SAE] network can never be joined however correct the
-  // password is, and a 5GHz-only one is invisible to it. Both present as an
-  // unexplained failure when someone types a name from memory.
+  // The flags and frequency columns are the reason this is worth having at
+  // all. This radio reports no SAE, so a WPA3-only network can never be
+  // joined however correct the password is. 5 GHz does work, but only on the
+  // channels the driver's regulatory table enables (joins are proven on
+  // channel 157 under its default WW domain); an AP on a channel outside
+  // that table never appears in the scan. Both present as an unexplained
+  // failure when someone types a name from memory.
   async function scanWifiConsole(con) {
     if (!con) throw new Error('No serial console — re-run the Reboot and Watch step.');
     const wpa = 'wpa_cli -p /data/misc/wifi/sockets -i wlan0';
@@ -9568,6 +10062,15 @@ function ScopeToggle({ local, onChange, disabled }) {
   );
 }
 
+// A stage that cannot be edited here, as its style. Read-only without
+// opacity: dimming took the inherited values to 1.2-1.9:1, which is why
+// controller/CLAUDE.md forbids dimming text that way. Two objects rather
+// than one so Stage can tell a section that follows the fleet (said on the
+// stage, with where to change it) from an account that cannot edit at all
+// (said once, at the top of the form).
+const READ_ONLY     = { pointerEvents: 'none' };
+const FOLLOWS_FLEET = { pointerEvents: 'none' };
+
 function Stage({ n, title, chips, desc, children, scope, dim, after }) {
   return (
     <Panel>
@@ -9579,6 +10082,11 @@ function Stage({ n, title, chips, desc, children, scope, dim, after }) {
         <div style={{ display: 'flex', gap: 'var(--space-3)', alignItems: 'center' }}>{chips}{scope}</div>
       </div>
       <div style={{ fontFamily: STAGE_MONO, fontSize: 'var(--fs-sm)', color: 'var(--muted)', lineHeight: 1.6, marginBottom: 'var(--space-7)' }}>{desc}</div>
+      {dim === FOLLOWS_FLEET && (
+        <div className="em-field__help" style={{ color: 'var(--accent)' }}>
+          Follows the fleet. Set Scope to Device to change it for this Echo only, or change it for every Echo in Settings.
+        </div>
+      )}
       {/* dim: a section following the fleet is shown read-only rather than
           hidden, so you can still see what it is inheriting. */}
       <div style={dim}>{children}</div>
@@ -9684,6 +10192,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
   // no per-section switches and every control is live.
   const scoped = Array.isArray(sections);
   const isLocal = id => !scoped || sections.includes(id);
+  const devTools = useDevTools();
 
   // Writes are gated by the OWNING SECTION rather than per control. Deriving
   // the section from the key means every existing and future control becomes
@@ -9695,15 +10204,13 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
     onChange(k, v);
   };
 
-  // Per-stage props: the Fleet/Device switch, and the dimming for a stage
-  // that is currently inheriting.
+  // Per-stage props: the Fleet/Device switch, and the read-only style for a
+  // stage that is currently inheriting.
   const scopeEl = id => scoped
     ? <ScopeToggle local={isLocal(id)} disabled={disabled}
         onChange={local => onScopeChange && onScopeChange(id, local)}/>
     : null;
-  const secStyle = id => (disabled || !isLocal(id))
-    ? { opacity: 0.45, pointerEvents: 'none' }
-    : {};
+  const secStyle = id => disabled ? READ_ONLY : !isLocal(id) ? FOLLOWS_FLEET : {};
 
   // Derive current mic preset from beamAngle
   const angle = config.beamAngle ?? -1;
@@ -9853,7 +10360,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
   const [advRing, setAdvRing] = useState(false);
   const [advPlay, setAdvPlay] = useState(false);
 
-  const inputStyle = disabled ? { opacity: 0.45, pointerEvents: 'none' } : {};
+  const inputStyle = disabled ? READ_ONLY : {};
   const mono = "var(--font-mono)";
 
   // Small header for subsections inside the combined Advanced stage.
@@ -9869,6 +10376,12 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
   // switched to relevance.)
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
+
+      {disabled && (
+        <div className="em-field__help" style={{ color: 'var(--text2)' }}>
+          Read-only: changing these settings needs an admin account.
+        </div>
+      )}
 
       {/* 01 PLAYBACK */}
       <Stage n="01" title="Playback"
@@ -10106,7 +10619,8 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
               )}
               {/* Where the wake word is detected (docs/listening.md). Two
                   choices; "shadow" is a developer diagnostic, set through the
-                  API and shown here only on an Echo already in it, labelled as
+                  API and shown here only on an Echo already in it or with
+                  developer tools on, labelled as
                   the streaming mode it is. "On this Echo" needs oww_trigger —
                   shadow shipped first and there is firmware in the field that
                   scores and reports without being able to act on it. */}
@@ -10128,7 +10642,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                   // them reports itself degraded (button only) below.
                   { value: 'on',  label: 'On this Echo',      disabled: !triggerCapable },
                   { value: 'off', label: 'On the controller' },
-                  ...(onDeviceMode(config) === 'shadow'
+                  ...(onDeviceMode(config) === 'shadow' || (devTools && shadowCapable)
                     ? [{ value: 'shadow', label: 'Diagnostic (streams)' }] : []),
                 ]}
                 onChange={v => set('owwOnDevice', v)}/>
@@ -10688,6 +11202,7 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
                         emosFleet = true }) {
   const [tab, setTab]             = useState('fleet');
   const [config, setConfig]       = useState({ ...globalConfig });
+  const devTools                  = useDevTools();
   const [dirty, setDirty]         = useState(false);
   const [saving, setSaving]       = useState(false);
 
@@ -10854,7 +11369,7 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
       onClick={e => e.target === e.currentTarget && onClose()}>
       {/* Same fixed frame as the device Detail modal — consistent window
           size across the whole dashboard. */}
-      <div className="em-modal" style={{ width:'min(900px,95vw)', height:'min(700px,90vh)', background:'linear-gradient(170deg,var(--raised),var(--surface))', border:'1px solid var(--border)', borderRadius:'var(--radius-dialog)', boxShadow:'0 24px 80px rgba(0,0,0,0.3),0 2px 0 var(--sheen) inset', display:'flex', flexDirection:'column', overflow:'hidden', animation:'fadeIn 0.15s ease' }}>
+      <div className="em-modal" style={{ width:'min(1120px,96vw)', height:'min(880px,92vh)', background:'linear-gradient(170deg,var(--raised),var(--surface))', border:'1px solid var(--border)', borderRadius:'var(--radius-dialog)', boxShadow:'0 24px 80px rgba(0,0,0,0.3),0 2px 0 var(--sheen) inset', display:'flex', flexDirection:'column', overflow:'hidden', animation:'fadeIn 0.15s ease' }}>
 
         {/* Header */}
         <div className="em-modal-head" style={{ background:'linear-gradient(180deg,var(--card),var(--bg))', borderBottom:'1px solid var(--border-hard)', padding:'var(--space-10) var(--space-12) 0', boxShadow:'0 1px 0 var(--sheen) inset' }}>
@@ -10896,7 +11411,7 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
                 Settings for this controller. Nothing here is pushed to a device.
               </div>
 
-              {!sys && !sysMsg && <div className="help">Loading…</div>}
+              {!sys && !sysMsg && <div className="em-field__help">Loading…</div>}
 
               {sys && (() => {
                 const secs     = Number(sysVal('update_check_interval', '3600'));
@@ -10985,6 +11500,17 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
                   {sysMsg.ok ? '✓ ' : ''}{sysMsg.text}
                 </div>
               )}
+
+              {/* Not system_config: it changes what this browser shows, takes
+                  effect at once, and needs no Save. */}
+              <div className="em-panel em-panel--stacked" style={{ marginTop: 'var(--space-9)' }}>
+                <div className="em-label" style={{ marginBottom:'var(--space-7)' }}>This browser</div>
+                <Toggle label="Show developer tools" sub="this browser only" value={devTools} onChange={setDevTools}/>
+                <div className="em-field__help" style={{ marginBottom: 0 }}>
+                  Adds an Echo&apos;s root Console tab, Local Build and Local payload on its Updates
+                  tab, Re-apply debloat, and the diagnostic wake word mode.
+                </div>
+              </div>
             </div>
           )}
 
@@ -11010,7 +11536,7 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
                     : <Pill accent onClick={() => setUserRole(u.id, 'admin')}>Promote to admin</Pill>}
                 </div>
               ))}
-              {!users && !usersMsg && <div className="help">Loading…</div>}
+              {!users && !usersMsg && <div className="em-field__help">Loading…</div>}
               {usersMsg && (
                 <div style={{ marginTop: 'var(--space-7)', fontFamily: "var(--font-mono)", fontSize: 'var(--fs-md)',
                   color: usersMsg.ok ? 'var(--ok)' : 'var(--error)' }}>
@@ -11309,6 +11835,11 @@ function App() {
   // yet dialled in is not asking for anything (#453).
   const pending  = devices.filter(d => !d.approved && d.last_seen != null);
   const updates  = approved.filter(d => d.firmware_update).length;
+  // Disable the console password only when every device has POSITIVELY
+  // reported Android. An empty list means nothing has ever said, which is
+  // not the same answer (see em_db.fleet_base_os).
+  const emosFleet = !status?.fleet_base_os?.length
+                    || status.fleet_base_os.includes('emos');
   const active   = approved.filter(d => d.speaking || d.listening || d.thinking).length;
 
   const selectedDevice = selected ? devices.find(d => d.device_id === selected) : null;
@@ -11400,6 +11931,16 @@ function App() {
                 color:'var(--text2)', whiteSpace:'pre-wrap', wordBreak:'break-word',
                 margin:0, maxHeight:320, overflowY:'auto',
               }}>{ctrlRelease.notes}</pre>
+              {/* Under ingress this is the Home Assistant app, which
+                  Supervisor updates; there is no compose file to run a
+                  command beside. */}
+              {isIngress() ? (
+                <div style={{ fontFamily:"var(--font-sans)", fontSize:'var(--fs-sm)', color:'var(--text2)',
+                              marginTop:'var(--space-7)', lineHeight:1.6 }}>
+                  Update it in Home Assistant: Settings, then Apps (Add-ons on older
+                  versions), then the EchoMuse app, then Update.
+                </div>
+              ) : (<>
               <div style={{ fontFamily:"var(--font-mono)", fontSize:'var(--fs-xs)', color:'var(--muted)',
                             marginTop:'var(--space-7)', lineHeight:1.6 }}>
                 Update it yourself, from wherever your compose file lives:
@@ -11409,6 +11950,7 @@ function App() {
                 background:'rgba(0,0,0,0.35)', border:'1px solid rgba(0,0,0,0.5)',
                 borderRadius:'var(--radius-md)', padding:'var(--space-5) var(--space-6)', margin:'var(--space-4) 0 0', overflowX:'auto',
               }}>docker compose pull &amp;&amp; docker compose up -d</pre>
+              </>)}
               {ctrlRelease.release_url && (
                 <a href={ctrlRelease.release_url} target="_blank" rel="noreferrer"
                    style={{ fontFamily:"var(--font-mono)", fontSize:'var(--fs-xs)', color:'var(--muted)',
@@ -11579,11 +12121,7 @@ function App() {
         <SettingsPanel
           globalConfig={globalConfig}
           onGlobalConfigChange={setGlobalConfig}
-          /* Disable the console password only when every device has
-             POSITIVELY reported Android. An empty list means nothing has ever
-             said, which is not the same answer — see em_db.fleet_base_os. */
-          emosFleet={!status?.fleet_base_os?.length
-                     || status.fleet_base_os.includes('emos')}
+          emosFleet={emosFleet}
           onClose={() => setShowSettings(false)}
           username={role}
           isAdmin={isAdmin}
@@ -11599,6 +12137,10 @@ function App() {
           onApprove={() => API.get('/api/devices').then(setDevices).catch(() => {})}
           isAdmin={isAdmin}
           globalConfig={globalConfig}
+          onGlobalConfigChange={setGlobalConfig}
+          soloFleet={approved.length === 1}
+          emosFleet={emosFleet}
+          ctrlRelease={ctrlRelease}
           onDeviceConfigChange={(device_id, patch) =>
             setDevices(prev => prev.map(d =>
               d.device_id === device_id ? { ...d, ...patch } : d
