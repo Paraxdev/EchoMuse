@@ -93,13 +93,25 @@ if ! ha_app info "$FORK_SLUG" >/dev/null 2>&1; then
     die "Supervisor does not list $FORK_SLUG after the reload; it probably refused config.yaml (Supervisor log above)"
 fi
 
-if [ "$action" = rebuild ]; then
+# Supervisor refuses a rebuild before it removes anything when the host has no
+# internet, too little disk or an unhealthy system, so whether the fork lost
+# its image is read back from its state rather than assumed. A rebuild that
+# got as far as removing it cannot start the app again, which leaves 'error'.
+rebuild_failed_hint() {
+    _now=$(app_field "$FORK_SLUG" state 2>/dev/null) || _now=unknown
     if [ "$running" = 1 ]; then
-        fail_hint="The fork was running, and Supervisor removed its image before building, so it now has no image and is stopped: nothing answers the Echo. 'sh tools/fork/pve.sh rollback' starts the upstream app; deploy again once the build can succeed to come back to the fork."
+        case $_now in
+            started | startup)
+                fail_hint="Supervisor refused the rebuild before removing anything (the log above says why), so $FORK_SLUG is still running on its image. Nothing needs undoing."
+                ;;
+            *)
+                fail_hint="The fork was running, and Supervisor removed its image before building, so it now has no image and is stopped: nothing answers the Echo. 'sh tools/fork/pve.sh rollback' starts the upstream app; deploy again once the build can succeed to come back to the fork."
+                ;;
+        esac
     else
-        fail_hint="Supervisor removed the fork's image before building, so $FORK_SLUG has no image until a deploy succeeds. If it was the controller in use, 'sh tools/fork/pve.sh rollback' starts the upstream app."
+        fail_hint="Unless Supervisor refused the rebuild outright (the log above says which), it removed the fork's image before building, so $FORK_SLUG has no image until a deploy succeeds. If it was the controller in use, 'sh tools/fork/pve.sh rollback' starts the upstream app."
     fi
-fi
+}
 
 step "ha $HA_GROUP $action $FORK_SLUG: Supervisor builds the image now, which takes minutes"
 timed_out=0
@@ -114,6 +126,7 @@ if ! out=$(ha_app "$action" "$FORK_SLUG" 2>&1); then
             ;;
         *)
             ha_cli supervisor logs 2>/dev/null | tail -n 60 >&2 || true
+            [ "$action" != rebuild ] || rebuild_failed_hint
             die "ha $HA_GROUP $action $FORK_SLUG failed (Supervisor log above)"
             ;;
     esac

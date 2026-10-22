@@ -462,13 +462,30 @@ def test_a_rebuild_of_the_running_fork_needs_force(deployed):
 def test_a_failed_rebuild_of_the_running_fork_says_how_to_go_back(deployed):
     sim = deployed
     pve(sim, "migrate")
+    sim.update(lambda st: st.update(build_fails=["rebuild"]))
+
+    p = deploy(sim, "--force", check=False)
+
+    assert p.returncode != 0
+    assert sim.app(ff.FORK)["state"] == "error"
+    assert "now has no image" in p.stderr
+    assert "'sh tools/fork/pve.sh rollback' starts the upstream app" in p.stderr
+
+
+def test_a_rebuild_supervisor_refuses_leaves_the_running_fork_alone(deployed):
+    """Supervisor refuses a rebuild before removing anything when the host
+    has no internet, too little disk or an unhealthy system. The fork is
+    still serving the Echo then, and rolling back would only take it down."""
+    sim = deployed
+    pve(sim, "migrate")
     sim.update(lambda st: st.update(fail=["rebuild"]))
 
     p = deploy(sim, "--force", check=False)
 
     assert p.returncode != 0
-    assert "now has no image" in p.stderr
-    assert "'sh tools/fork/pve.sh rollback' starts the upstream app" in p.stderr
+    assert sim.app(ff.FORK)["state"] == "started"
+    assert f"{ff.FORK} is still running on its image" in p.stderr
+    assert "no image" not in p.stderr and "rollback" not in p.stderr
 
 
 def test_migrate_starts_the_fork_once_when_supervisor_made_no_data_folder(deployed):

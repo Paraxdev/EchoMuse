@@ -11,7 +11,10 @@ on a real Supervisor, where the controller ignores SIGTERM, dies of SIGKILL
 and so counts as failed. Its container goes at once, unless the app is in
 `sticky` (it stays) or `linger` (it stays for that many `docker ps`
 listings). A local app is "built" by reading the version from its
-folder's config.yaml, as Supervisor would. A `docker run` container is its
+folder's config.yaml, as Supervisor would. An action in `fail` is refused
+before anything changes; a rebuild in `build_fails` fails after removing the
+app's container and image, as Supervisor's does, which leaves a running app
+in 'error'. A `docker run` container is its
 command run on this host with each mount's target rewritten to its source, on
 the PATH in EMF_FAKE_CONTAINER_PATH. `qm` runs `qm guest exec` locally, on
 the PATH in EMF_FAKE_GUEST_PATH when that is set, and answers in the JSON
@@ -138,6 +141,13 @@ def ha(args):
     elif action == "rebuild":
         if app["version"] != app.get("version_latest"):
             print("Error: Version changed, use Update instead Rebuild", file=sys.stderr)
+            return 1
+        if action in s.get("build_fails", []):
+            s["containers"].pop(container_id(slug), None)
+            if app.get("state") in ("started", "startup"):
+                app["state"] = "error"
+            save()
+            print("Error: build failed (injected)", file=sys.stderr)
             return 1
     elif action == "start":
         start(slug)

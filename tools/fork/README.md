@@ -220,7 +220,10 @@ fork for the length of the build**, and leaves it with no image if the build
 fails. `deploy` therefore refuses to rebuild the fork while it runs. Deploy a
 new commit instead (an update), or rebuild anyway with
 `sh tools/fork/pve.sh deploy --force`; if that build fails,
-`sh tools/fork/pve.sh rollback` starts the upstream app.
+`sh tools/fork/pve.sh rollback` starts the upstream app. Supervisor refuses a
+rebuild outright, before removing anything, when the VM has no internet, too
+little disk or an unhealthy system; the fork then keeps running, and
+`deploy` says so instead.
 
 `sh tools/fork/pve.sh status` shows both apps, their data folders, the
 migration record and the backups. Backups are never deleted by these
