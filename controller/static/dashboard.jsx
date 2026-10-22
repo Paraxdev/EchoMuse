@@ -1921,7 +1921,7 @@ function HomeTab({ device, globalConfig, release, ctrlRelease, activity, isAdmin
 // ─── Device detail modal ──────────────────────────────────────────────────────
 
 function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDeviceConfigChange,
-                  onGlobalConfigChange, soloFleet = false, ctrlRelease }) {
+                  onGlobalConfigChange, soloFleet = false, emosFleet = true, ctrlRelease }) {
   const [tab, setTab] = useState(() => device.approved ? 'home' : 'approve');
   // Seed from the EFFECTIVE config, not the raw stored one — see
   // effectiveConfig(). A migrated row's stored dict is not the truth.
@@ -2875,6 +2875,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                       This is the only Echo, so these are the fleet settings. Another Echo added later starts from them.
                     </div>
                     <DeviceConfigForm config={fleetCfg} onChange={setFleetConf} disabled={!isAdmin}
+                      emosFleet={emosFleet}
                       {...caps} hwEchoRef={device.connected && device.aecRef === 'hw'}/>
                     {isAdmin && fleetDirty && (
                       <div style={{ display: 'flex', gap: 'var(--space-5)', marginTop: 'var(--space-12)' }}>
@@ -11794,6 +11795,11 @@ function App() {
   // yet dialled in is not asking for anything (#453).
   const pending  = devices.filter(d => !d.approved && d.last_seen != null);
   const updates  = approved.filter(d => d.firmware_update).length;
+  // Disable the console password only when every device has POSITIVELY
+  // reported Android. An empty list means nothing has ever said, which is
+  // not the same answer (see em_db.fleet_base_os).
+  const emosFleet = !status?.fleet_base_os?.length
+                    || status.fleet_base_os.includes('emos');
   const active   = approved.filter(d => d.speaking || d.listening || d.thinking).length;
 
   const selectedDevice = selected ? devices.find(d => d.device_id === selected) : null;
@@ -12075,11 +12081,7 @@ function App() {
         <SettingsPanel
           globalConfig={globalConfig}
           onGlobalConfigChange={setGlobalConfig}
-          /* Disable the console password only when every device has
-             POSITIVELY reported Android. An empty list means nothing has ever
-             said, which is not the same answer — see em_db.fleet_base_os. */
-          emosFleet={!status?.fleet_base_os?.length
-                     || status.fleet_base_os.includes('emos')}
+          emosFleet={emosFleet}
           onClose={() => setShowSettings(false)}
           username={role}
           isAdmin={isAdmin}
@@ -12097,6 +12099,7 @@ function App() {
           globalConfig={globalConfig}
           onGlobalConfigChange={setGlobalConfig}
           soloFleet={approved.length === 1}
+          emosFleet={emosFleet}
           ctrlRelease={ctrlRelease}
           onDeviceConfigChange={(device_id, patch) =>
             setDevices(prev => prev.map(d =>
