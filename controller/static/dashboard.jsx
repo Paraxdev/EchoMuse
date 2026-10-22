@@ -1690,10 +1690,13 @@ function _clockTime(ts) {
 // Why the control link last closed, from `lastDisconnect` ({at, why,
 // routine}). A controller from before the field sends nothing, and then this
 // is null and only last seen is shown: a guessed reason is worse than none.
+// `at` arrives in epoch MILLISECONDS (em_device_view.note_disconnect), unlike
+// last_seen, and is returned in seconds for relTime and _clockTime: read as
+// seconds it put the drop 55,000 years ahead.
 function _lastDrop(device) {
   const ld = device.lastDisconnect;
   if (!ld || !ld.why) return null;
-  return { at: ld.at || null, why: ld.routine ? `${ld.why} (routine)` : ld.why };
+  return { at: ld.at ? ld.at / 1000 : null, why: ld.routine ? `${ld.why} (routine)` : ld.why };
 }
 
 // Whether Home Assistant is on the other end of this Echo's voice port

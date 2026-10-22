@@ -70,12 +70,17 @@ check("other outcomes keep their words", outcomeLabel("pipeline_refused") === "p
 check("ok stays ok", outcomeLabel("ok") === "ok");
 check("a missing outcome is a question mark", outcomeLabel(null) === "?");
 
-// _lastDrop: absent on a controller from before the field.
+// _lastDrop: absent on a controller from before the field. `at` is epoch
+// milliseconds on the wire (em_device_view.note_disconnect) and seconds out,
+// the unit relTime and _clockTime take.
 check("no field, no reason", lastDrop({ connected: false }) === null);
 check("a field with no why is no reason", lastDrop({ lastDisconnect: { at: 1 } }) === null);
-const drop = lastDrop({ lastDisconnect: { at: 1761096317, why: "we closed it: 1011 (internal error) 'keepalive ping timeout'", routine: false } });
+const drop = lastDrop({ lastDisconnect: { at: 1761096317250, why: "we closed it: 1011 (internal error) 'keepalive ping timeout'", routine: false } });
 check("the reason is passed through as written", drop.why.endsWith("'keepalive ping timeout'"));
-check("the time is kept", drop.at === 1761096317);
+check("epoch ms comes out as epoch seconds", drop.at === 1761096317.25);
+const justNow = lastDrop({ lastDisconnect: { at: Date.now() - 5000, why: "x" } }).at;
+check("a drop five seconds ago is five seconds ago, not in the future",
+      Date.now() / 1000 - justNow >= 4 && Date.now() / 1000 - justNow < 60);
 check("a routine close says so",
       lastDrop({ lastDisconnect: { at: 5, why: "peer closed it: 1001 (going away)", routine: true } })
         .why.endsWith("(routine)"));
