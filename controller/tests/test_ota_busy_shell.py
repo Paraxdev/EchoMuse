@@ -25,7 +25,7 @@ import em_shell
 import em_state
 
 DEVICE = "G090LF0000000004"
-HOLD_S = 0.5
+HOLD_S = 1.5
 
 
 class Shell:
@@ -130,6 +130,21 @@ def test_the_rollback_waits_for_a_busy_shell(device, monkeypatch):
     assert DEVICE not in em_ota.errors, em_ota.errors.get(DEVICE)
     assert any("ln -sf server_b" in cmd for cmd in live.shell.sent)
     assert {"type": "device_rolled_back", "device_id": DEVICE, "version": "v1.0.0"} in events
+
+
+def test_the_update_flip_waits_for_a_busy_shell(device, monkeypatch):
+    """A listing that takes the lock between the transfer and the flip must
+    delay the flip, not drop it: a flip never sent read as a rollback."""
+    live, events = device
+
+    async def back(device_id, version, previous_version=None, timeout=90):
+        return any("ln -sf server_b" in cmd for cmd in live.shell.sent)
+
+    monkeypatch.setattr(em_ota, "_monitor_reconnect", back)
+    _while_held(lambda: em_ota._flip_and_confirm(
+        DEVICE, "v2.0.0", live, "server_b", "v1.0.0"))
+    assert any("ln -sf server_b" in cmd for cmd in live.shell.sent)
+    assert DEVICE not in em_ota.errors, em_ota.errors.get(DEVICE)
 
 
 def test_the_detect_outwaits_the_asset_listing():

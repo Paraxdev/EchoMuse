@@ -52,7 +52,8 @@ queue = asyncio.Lock()
 # and the reconnect watch after it are outside it and bound themselves.
 MAX_HOLD_S = 300.0
 
-# How long the slot detect waits for the device's shell lock. The asset
+# How long the slot detect and the slot flip wait for the device's shell
+# lock; a flip that gave up early was reported as an automatic rollback. The asset
 # listing the Updates tab sends on opening holds it for up to its 120s budget,
 # plus 15s to open the session and the close, and a lock wait that ran out
 # read as "Could not determine active slot".
@@ -387,7 +388,8 @@ async def _flip_and_confirm(device_id: str, version: str, live,
                               f"Flipping symlink → {inactive_slot} and restarting")
         result = await em_shell.run(live,
             f"ln -sf {inactive_slot} /data/local/bin/server && "
-            f"kill $PPID"
+            f"kill $PPID",
+            lock_wait=DETECT_LOCK_WAIT_S,
         )
         # Shell dies when the server process is killed — FLIP_OK will never arrive.
         # _monitor_reconnect below detects whether the restart succeeded.
@@ -526,7 +528,8 @@ async def run_rollback(device_id: str, target_version: str) -> None:
 
         result = await em_shell.run(live,
             f"ln -sf {inactive_slot} /data/local/bin/server && "
-            f"kill $PPID"
+            f"kill $PPID",
+            lock_wait=DETECT_LOCK_WAIT_S,
         )
         # Shell dies when the server process is killed — ROLLBACK_OK will never arrive.
 
