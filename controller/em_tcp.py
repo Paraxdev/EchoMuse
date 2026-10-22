@@ -78,7 +78,7 @@ def limit_unsent(sock, nbytes: int = BULK_UNSENT_BYTES) -> bool:
     except OSError as e:
         if not _warned_unsent:
             _warned_unsent = True
-            log.warning(f"TCP_NOTSENT_LOWAT not applied ({e}) - a bulk shell "
+            log.warning(f"TCP_NOTSENT_LOWAT not applied ({e}), so a bulk shell "
                         f"transfer can queue its keepalive behind megabytes")
         return False
 
