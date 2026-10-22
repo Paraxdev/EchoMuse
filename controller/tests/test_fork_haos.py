@@ -433,8 +433,10 @@ def test_a_rollback_that_cannot_stop_the_fork_starts_nothing_and_says_what_to_do
     up = sim.app(ff.UPSTREAM)
     assert (up["state"], up["boot"]) == ("error", "manual"), "nothing starts beside the fork"
     assert "never both" in p.stderr
-    assert f"ha apps start {ff.UPSTREAM}" in p.stderr
-    assert f"ha apps start {ff.FORK}" in p.stderr
+    # pve.sh prints this on the Proxmox host, so that is where it must run.
+    by_hand = "qm guest exec <vmid> -- docker exec hassio_cli ha apps start"
+    assert f"{by_hand} {ff.UPSTREAM}" in p.stderr
+    assert f"{by_hand} {ff.FORK}" in p.stderr
     assert not (sim.work / "lock").exists()
 
 

@@ -37,13 +37,14 @@ take_lock
 app_installed "$UPSTREAM_SLUG" \
     || die "$UPSTREAM_SLUG is not installed; give the upstream app's slug with --from"
 
-# By hand, in the VM; from the Proxmox host, after 'qm guest exec <vmid> --'.
-start_cmd="docker exec $CLI ha $HA_GROUP start"
+# pve.sh prints the hints on the Proxmox host, so the commands in them are in
+# the form that runs there; in the VM itself, drop 'qm guest exec <vmid> --'.
+ha_by_hand="qm guest exec <vmid> -- docker exec $CLI ha $HA_GROUP"
 
 step "1/3 Stop $FORK_SLUG and turn off its start at boot"
-fail_hint="The rollback stopped part way and nothing was deleted, but nothing may be running now: $FORK_SLUG can be stopped with Start on boot still on, and $UPSTREAM_SLUG stopped with it off. Run 'sh tools/fork/pve.sh rollback' again, or start ONE of them by hand, never both (they bind the same ports): Settings > Apps > the app > Start, with Start on boot on for that one only, or
-  $start_cmd $UPSTREAM_SLUG    (the upstream app)
-  $start_cmd $FORK_SLUG    (the fork)"
+fail_hint="The rollback stopped part way and nothing was deleted, but nothing may be running now: $FORK_SLUG can be stopped with Start on boot still on, and $UPSTREAM_SLUG stopped with it off. Run 'sh tools/fork/pve.sh rollback' again, or start ONE of them by hand, never both (they bind the same ports): Settings > Apps > the app > Start, with Start on boot on for that one only, or on the Proxmox host (<vmid> is the Home Assistant VM, 100 by default)
+  $ha_by_hand start $UPSTREAM_SLUG    (the upstream app)
+  $ha_by_hand start $FORK_SLUG    (the fork)"
 if app_installed "$FORK_SLUG"; then
     stop_app "$FORK_SLUG"
     set_boot "$FORK_SLUG" manual
@@ -60,9 +61,10 @@ step "2/3 Turn on $UPSTREAM_SLUG's start at boot"
 set_boot "$UPSTREAM_SLUG" auto
 
 step "3/3 Start $UPSTREAM_SLUG"
-fail_hint="$FORK_SLUG is stopped with Start on boot off, and $UPSTREAM_SLUG has Start on boot on but did not start. Start it with Settings > Apps > the upstream app > Start, or
-  $start_cmd $UPSTREAM_SLUG
-and read why it failed: docker exec $CLI ha $HA_GROUP logs $UPSTREAM_SLUG"
+fail_hint="$FORK_SLUG is stopped with Start on boot off, and $UPSTREAM_SLUG has Start on boot on but did not start. Start it with Settings > Apps > the upstream app > Start, or on the Proxmox host (<vmid> is the Home Assistant VM, 100 by default)
+  $ha_by_hand start $UPSTREAM_SLUG
+and read why it failed with
+  $ha_by_hand logs $UPSTREAM_SLUG"
 if [ "$start" = 0 ]; then
     say "Not started (--no-start). It starts at the next boot, or: docker exec $CLI ha $HA_GROUP start $UPSTREAM_SLUG"
 elif [ "$(app_field "$UPSTREAM_SLUG" state)" = started ]; then
