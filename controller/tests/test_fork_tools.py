@@ -142,6 +142,42 @@ def test_a_new_module_does_not_force_the_full_build(tmp_path):
     assert (tmp_path / "out" / "app" / "em_new_thing.py").is_file()
 
 
+def _esbuild_line(dockerfile):
+    [line] = [ln for ln in dockerfile.splitlines()
+              if ln.startswith("RUN ") and "esbuild /app/static/dashboard.jsx" in ln]
+    return line
+
+
+@needs_sh
+def test_a_changed_esbuild_step_does_not_force_the_full_build(tmp_path):
+    """The overlay runs the fork's own esbuild line on the base image, so a
+    change to it (the fork's --minify) is applied either way and must not
+    refuse the overlay. Every other Dockerfile line still counts."""
+    root = tmp_path / "repo"
+    _copy_tree(root)
+    df = root / "controller" / "Dockerfile"
+    text = df.read_text(encoding="utf-8")
+    line = _esbuild_line(text)
+    before = tree_fingerprint(root)
+
+    changed = line.replace("--outfile=", "--sourcemap --outfile=")
+    df.write_text(text.replace(line, changed), encoding="utf-8")
+    assert tree_fingerprint(root) == before
+    if before == base_fingerprint():
+        build(tmp_path / "out", root=root)
+        assert _esbuild_line((tmp_path / "out" / "Dockerfile").read_text()) == changed
+
+    # Left out of the fingerprint, but the overlay still needs exactly one.
+    df.write_text(text.replace(line + "\n", ""), encoding="utf-8")
+    assert tree_fingerprint(root) == before
+    if before == base_fingerprint():
+        p = build(tmp_path / "out2", root=root, check=False)
+        assert p.returncode != 0 and "no single esbuild RUN line" in p.stderr
+
+    df.write_text(text.replace(line, line + "\nRUN true"), encoding="utf-8")
+    assert tree_fingerprint(root) != before
+
+
 @needs_sh
 def test_the_builder_refuses_to_replace_a_folder_it_did_not_write(tmp_path):
     out = tmp_path / "somebody_elses"

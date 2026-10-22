@@ -60,7 +60,8 @@ published image deletes esbuild, and `dashboard.js` is not in git). Supervisor
 builds it in about a minute; esbuild is the only download.
 
 It is only right while the fork builds its image from the same inputs as that
-base: `controller/Dockerfile` (apart from its per-module `COPY x.py .` lines),
+base: `controller/Dockerfile` (apart from its per-module `COPY x.py .` lines
+and its esbuild line, which the overlay runs as the fork has it),
 `requirements.txt`, and the two model rewrite tools. `build_app.sh` compares a
 fingerprint of those with the base's and refuses the overlay when they
 differ, and the image build compares `requirements.txt` with the base image's

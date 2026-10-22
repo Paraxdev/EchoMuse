@@ -16,8 +16,10 @@
 # The overlay is only right while the fork's image inputs (Dockerfile,
 # requirements.txt, the two model rewrite tools) are the ones the base image
 # was built from, so it refuses otherwise instead of shipping old wheels under
-# new code. BASE_FINGERPRINT records those inputs at the base image's commit;
-# `--fingerprint <git-ref>` recomputes it when the base moves.
+# new code. The Dockerfile's per-module COPY lines and its esbuild line are not
+# counted, since the overlay does both itself. BASE_FINGERPRINT records those
+# inputs at the base image's commit; `--fingerprint <git-ref>` recomputes it
+# when the base moves.
 #
 # Options, schema, ports and ingress are controller-ea/config.yaml verbatim,
 # so the upstream app's options are valid here unchanged.
@@ -35,7 +37,7 @@ set -eu
 # Built from controller-ea-v2.27.0-ea.1 (50bbbc3).
 BASE_IMAGE="ghcr.io/wilbowes/echomuse-controller:2.27.0-ea.1@sha256:52693f2230e0342cd1838eb00a5c27d7084160b2bfcad15b8bac117dbd0ab533"
 BASE_REF="controller-ea-v2.27.0-ea.1"
-BASE_FINGERPRINT="88dd10584bb8dca8905de333f13d6e87dd1fef8e3163098d288e0d92cc9115c7"
+BASE_FINGERPRINT="7ac132101cb8722fe9bb232dc7cdd0251102e782959e8c3d8a66858a5700349b"
 
 SLUG="echomuse_fork"
 NAME="EchoMuse (Paraxdev fork)"
@@ -55,7 +57,9 @@ CTRL="$ROOT/controller"
 EA="$ROOT/controller-ea"
 
 # Per-module `COPY x.py .` lines are left out: the overlay copies every *.py,
-# so a new module, which always adds one, does not force the full build. CR is
+# so a new module, which always adds one, does not force the full build. So is
+# the dashboard's esbuild RUN line, which the overlay runs as the fork has it
+# (write_overlay_dockerfile refuses unless there is exactly one). CR is
 # dropped so a checkout made with autocrlf still matches.
 fingerprint() {
     for f in $FP_FILES; do
@@ -71,7 +75,8 @@ fingerprint() {
             git -C "$ROOT" show "$1:$f"
         else
             cat "$ROOT/$f"
-        fi | tr -d '\r' | grep -v -E '^COPY[[:space:]]+[A-Za-z0-9_]+\.py[[:space:]]+\./?[[:space:]]*$' || true
+        fi | tr -d '\r' | grep -v -E '^COPY[[:space:]]+[A-Za-z0-9_]+\.py[[:space:]]+\./?[[:space:]]*$' \
+            | grep -v -E '^RUN .*esbuild /app/static/dashboard\.jsx' || true
     done | sha256sum | cut -d' ' -f1
 }
 
