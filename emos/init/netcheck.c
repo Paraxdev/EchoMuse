@@ -8,6 +8,8 @@
  *   - a default gateway read wrongly never answers, so the watchdog acts on a
  *     healthy link;
  *   - a probe exit code read wrongly turns "could not ask" into "no answer";
+ *   - a probe or wpa_cli call that never returns ends supervision for the
+ *     boot, since the loop waits on both;
  *   - the udhcpc script is the whole of what a lease does to wlan0: deconfig
  *     ignored keeps a lapsed address (#871), a route left behind keeps an old
  *     router in front;
@@ -454,8 +456,11 @@ static void probe(void)
         "echo \"$@\" > " T "args\n"
         "read code < " T "code\n"
         "[ \"$code\" = kill ] && kill -9 $$\n"
+        "[ \"$code\" = hang ] && read x < " T "fifo\n"
         "exit $code\n");
     chmod(bb, 0755);
+    unlink(T "fifo");
+    mkfifo(T "fifo", 0600);
 
     probe_case("arping heard a reply", bb, "0\n", 1);
     char *args = slurp(T "args", NULL);
@@ -469,9 +474,16 @@ static void probe(void)
     probe_case("no arping applet (127)", bb, "127\n", -2);
     probe_case("killed by a signal", bb, "kill\n", -1);
     probe_case("no busybox at all", T "no-such-busybox", "0\n", -2);
+    long t0 = mono_ms();
+    probe_case("an arping that never returns is stopped", bb, "hang\n", -1);
+    long took = mono_ms() - t0;
+    check(took >= WD_ARPING_MAX_S * 1000L - 100
+          && took < WD_ARPING_MAX_S * 1000L + 3000,
+          "... at its limit, %d s (%ld ms)", WD_ARPING_MAX_S, took);
     unlink(bb);
     unlink(T "code");
     unlink(T "args");
+    unlink(T "fifo");
 }
 
 /* ── The udhcpc script, run by a real shell ─────────────────────────────── */
@@ -914,6 +926,39 @@ static void stopping(void)
     unlink(T "child");
 }
 
+/* What the supervisor runs from its loop (arping, wpa_cli) must not be able
+ * to stop the loop. */
+static void bounded(void)
+{
+    char *argv[] = { T "child", NULL };
+
+    put(T "child", "#!/bin/sh\nexit 3\n");
+    chmod(T "child", 0755);
+    int st = run_bounded(argv, 5);
+    check(st >= 0 && WIFEXITED(st) && WEXITSTATUS(st) == 3,
+          "a command that finishes gives its exit status");
+
+    /* Blocked opening a FIFO nobody writes, as in stopping(): spawn()'s PATH
+     * is the device's, so there is no `sleep` to call here. */
+    unlink(T "pid");
+    unlink(T "fifo");
+    mkfifo(T "fifo", 0600);
+    put(T "child", "#!/bin/sh\necho $$ > " T "pid\nread x < " T "fifo\n");
+    chmod(T "child", 0755);
+    long t0 = mono_ms();
+    st = run_bounded(argv, 1);
+    long took = mono_ms() - t0;
+    char *pid = slurp(T "pid", NULL);
+    int gone = pid && atoi(pid) > 0 && kill(atoi(pid), 0) != 0
+            && errno == ESRCH;
+    check(st == -1 && took >= 900 && took < 4000 && gone,
+          "one that hangs is stopped at its limit and reaped (%ld ms)", took);
+    free(pid);
+    unlink(T "pid");
+    unlink(T "fifo");
+    unlink(T "child");
+}
+
 int main(void)
 {
     watchdog();
@@ -924,6 +969,7 @@ int main(void)
     limiter();
     evidence();
     stopping();
+    bounded();
 
     unlink(NETLOG);
     unlink(NETLOG ".1");

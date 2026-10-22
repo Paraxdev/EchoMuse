@@ -1506,6 +1506,49 @@ static int run_wait(char *const argv[])
     return st;
 }
 
+/* Ends a child and reaps it, SIGKILL after 5s. Left set when even that does
+ * not reap it (a supplicant stuck in the driver), so no second one is started
+ * beside it; the reaper at the top of the loop clears it if it ever exits. */
+static void stop_child(pid_t *pid)
+{
+    kill(*pid, SIGTERM);
+    for (int i = 0; i < 100; i++) {
+        if (i == 50)
+            kill(*pid, SIGKILL);
+        pid_t r = waitpid(*pid, NULL, WNOHANG);
+        if (r == *pid || (r < 0 && errno == ECHILD)) {
+            *pid = -1;
+            return;
+        }
+        usleep(100000);
+    }
+    netlog("pid %d still running after SIGKILL\n", (int)*pid);
+}
+
+/* run_wait() for what the WiFi supervisor runs from its own loop: a command
+ * still running after `secs` is stopped as stop_child() does and reads as -1.
+ * Waiting without a limit there would end supervision for the boot if one
+ * never returned, and wpa_cli talks to a supplicant that may be the very
+ * thing that is stuck. */
+static int run_bounded(char *const argv[], int secs)
+{
+    int st = 0;
+    pid_t p = spawn(argv);
+    if (p < 0)
+        return -1;
+    for (int i = 0; i < secs * 10; i++) {
+        pid_t r = waitpid(p, &st, WNOHANG);
+        if (r == p)
+            return st;
+        if (r < 0)
+            return -1;
+        usleep(100000);
+    }
+    netlog("%s still running after %ds, stopped\n", argv[0], secs);
+    stop_child(&p);
+    return -1;
+}
+
 /* The default gateway on `iface`, or on any interface when it is NULL, read
  * from the kernel's table as /proc/net/route prints it: each address is the
  * raw 32-bit value in hex, so on this little-endian SoC the first octet is the
@@ -2092,6 +2135,8 @@ enum { WD_NONE, WD_REASSOC, WD_RECONNECT, WD_RESTART };
 #define WD_GRACE_S   180
 #define WD_SETTLE_S  600
 #define WD_GAP_MAX_S 3600
+/* wpa_cli gives up on an unanswered request after 10s of its own. */
+#define WD_CLI_MAX_S 15
 
 struct linkwd {
     long off_since;   /* start of the current outage; -1 none */
@@ -2162,12 +2207,15 @@ static const char *const wd_step_name[] = { "none", "reassociate",
  * such as no interface (measured against busybox 1.37.0's); a failed exec is
  * 127, from spawn() or from busybox itself. Only 1 is a "no". Up to three
  * requests over three seconds, stopping at the first reply, so a healthy link
- * pays one frame each way per probe. */
+ * pays one frame each way per probe. An arping that outlives its own deadline
+ * is stopped, and is "could not ask". */
+#define WD_ARPING_MAX_S 10
+
 static int gateway_answers(const char *bb, const char *gw)
 {
     char *argv[] = { (char *)bb, "arping", "-q", "-f", "-c", "3", "-w", "3",
                      "-I", "wlan0", (char *)gw, NULL };
-    int st = run_wait(argv);
+    int st = run_bounded(argv, WD_ARPING_MAX_S);
     if (st < 0 || !WIFEXITED(st))
         return -1;
     switch (WEXITSTATUS(st)) {
@@ -2340,25 +2388,6 @@ static void netlast_save(const char *why, long now, const char *gw,
              read_counter("/sys/class/net/wlan0/statistics/tx_packets"));
     int r = netlast_write(line);
     netlog("net.last %s (%s)\n", r == 0 ? "written" : "NOT written", why);
-}
-
-/* Ends a child and reaps it, SIGKILL after 5s. Left set when even that does
- * not reap it (a supplicant stuck in the driver), so no second one is started
- * beside it; the reaper at the top of the loop clears it if it ever exits. */
-static void stop_child(pid_t *pid)
-{
-    kill(*pid, SIGTERM);
-    for (int i = 0; i < 100; i++) {
-        if (i == 50)
-            kill(*pid, SIGKILL);
-        pid_t r = waitpid(*pid, NULL, WNOHANG);
-        if (r == *pid || (r < 0 && errno == ECHILD)) {
-            *pid = -1;
-            return;
-        }
-        usleep(100000);
-    }
-    netlog("pid %d still running after SIGKILL\n", (int)*pid);
 }
 
 static void net_main(void)
@@ -2710,19 +2739,20 @@ static void net_main(void)
                        "step %d: %s\n", now - wd.off_since,
                        read_counter("/sys/class/net/wlan0/statistics/rx_packets"),
                        wd.steps, wd_step_name[act]);
-                run_wait(wpa_status);           /* its answer lands in the log */
+                /* Its answer lands in the log. */
+                run_bounded(wpa_status, WD_CLI_MAX_S);
                 snprintf(why, sizeof why, "watchdog-%s", wd_step_name[act]);
                 netlast_event(&nl, why);
                 if (netlast_due(&nl, now, why, sizeof why))
                     netlast_save(why, now, gw, &wd);
                 switch (act) {
                 case WD_REASSOC:
-                    run_wait(reassoc);
+                    run_bounded(reassoc, WD_CLI_MAX_S);
                     break;
                 case WD_RECONNECT:
-                    run_wait(wpa_disconnect);
+                    run_bounded(wpa_disconnect, WD_CLI_MAX_S);
                     sleep(2);
-                    run_wait(wpa_reconnect);
+                    run_bounded(wpa_reconnect, WD_CLI_MAX_S);
                     break;
                 case WD_RESTART:
                     /* The loop starts a new supplicant next turn, and a new
