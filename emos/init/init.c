@@ -21,6 +21,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <net/if.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -1943,6 +1944,61 @@ static void wpa_ctrl_dir(const char *conf, char *out, size_t n)
 /* 24 turns of a 5s loop = two minutes. */
 #define WIFI_FAIL_TURNS 24
 
+/* The script busybox udhcpc runs at each DHCP event; udhcpc applies nothing
+ * itself. Every event is handled (#871):
+ *
+ *   - deconfig is udhcpc saying the address is no longer ours: at its start,
+ *     and when a lease runs out or is NAKed. Ignoring it kept a lapsed address
+ *     on wlan0, one the router may since have handed to somebody else, and
+ *     has_ip() went on calling the device up.
+ *   - bound and renew replace the default route rather than adding one beside
+ *     it, so a lease naming another router does not leave the old one first.
+ *     The delete loop is busybox's own simple.script, bounded.
+ *   - leasefail and nak only say so, which is how the log answers why there
+ *     is no address.
+ *
+ * -1 when the text does not fit: snprintf truncates SILENTLY, and a short
+ * buffer here once cost a boot with an address but no default route. */
+static int udhcpc_script_text(char *out, size_t n, const char *bb)
+{
+    int k = snprintf(out, n,
+        "#!/system/bin/sh\n"
+        "case \"$1\" in\n"
+        "deconfig)\n"
+        "  echo \"udhcpc.sh: deconfig, clearing $interface\"\n"
+        "  %s ifconfig $interface 0.0.0.0\n"
+        "  ;;\n"
+        "bound|renew)\n"
+        "  %s ifconfig $interface $ip netmask $subnet\n"
+        "  if [ -n \"$router\" ]; then\n"
+        "    n=0\n"
+        "    while [ $n -lt 8 ] && %s route del default gw 0.0.0.0 dev $interface 2>/dev/null; do\n"
+        "      n=$((n + 1))\n"
+        "    done\n"
+        "    for r in $router; do\n"
+        "      %s route add default gw $r dev $interface && break\n"
+        "    done\n"
+        "  fi\n"
+        "  ;;\n"
+        "leasefail|nak)\n"
+        "  echo \"udhcpc.sh: $1${message:+: $message}\"\n"
+        "  ;;\n"
+        "esac\n"
+        "exit 0\n", bb, bb, bb, bb);
+    return (k < 0 || (size_t)k >= n) ? -1 : k;
+}
+
+/* Whether `udhcpc` resolves to `ours`, the busybox this image carries. -a is
+ * passed only then. build-busybox.sh refuses a build whose udhcpc cannot
+ * ARP-check, but an image without our busybox gets /sbin/udhcpc linked to
+ * whichever busybox the applet stage found, and an option that one does not
+ * know ends udhcpc before it asks for an address. */
+static int udhcpc_is_ours(const char *udhcpc, const char *ours)
+{
+    char a[PATH_MAX], b[PATH_MAX];
+    return realpath(udhcpc, a) && realpath(ours, b) && strcmp(a, b) == 0;
+}
+
 static void net_main(void)
 {
     /* FireOS 6 moved the combo-chip tools under /system/vendor and renamed
@@ -1993,17 +2049,9 @@ static void net_main(void)
      * address and discards it, which reads as a DHCP failure and is not.
      *
      * FireOS 5 keeps dhcpcd: it works on the fleet today. */
-    /* Sized generously: the busybox path is itself up to ~40 bytes and appears
-     * twice, and snprintf truncates SILENTLY -- a short buffer here cost a
-     * boot with an address but no default route, because the line that adds
-     * it was cut in half. */
-    char udhcpc_script[512];
-    snprintf(udhcpc_script, sizeof udhcpc_script,
-             "#!/system/bin/sh\n"
-             "[ \"$1\" = bound ] || [ \"$1\" = renew ] || exit 0\n"
-             "%s ifconfig $interface $ip netmask $subnet\n"
-             "[ -n \"$router\" ] && %s route add default gw $router\n",
-             bbp, bbp);
+    char udhcpc_script[1024];
+    if (udhcpc_script_text(udhcpc_script, sizeof udhcpc_script, bbp) < 0)
+        netlog("udhcpc script does not fit its buffer (busybox %s)\n", bbp);
     /* Not wr(): that is for sysfs and opens O_WRONLY without O_CREAT, so it
      * cannot make a file that does not exist yet. */
     int sfd = open(UDHCPC_SCRIPT, O_WRONLY | O_CREAT | O_TRUNC, 0755);
@@ -2018,8 +2066,20 @@ static void net_main(void)
 
     char *dhcp_fos5[] = { "/system/bin/dhcpcd", "-ABK", "-f",
                           "/system/etc/dhcpcd/dhcpcd.conf", "wlan0", NULL };
+    /* -a checks the offered address with ARP and declines it when another
+     * host answers (RFC 2131 3.1), so the server hands out a free one instead
+     * of the Echo sharing an address and dropping every few minutes (#871).
+     * busybox logs the decline itself. FireOS 5's dhcpcd keeps stock's -A,
+     * no check, with the rest of that path. */
     char *dhcp_fos6[] = { "/sbin/udhcpc", "-B", "-f", "-i", "wlan0",
-                          "-s", (char *)UDHCPC_SCRIPT, NULL };
+                          "-s", (char *)UDHCPC_SCRIPT, NULL, NULL };
+    if (vendor) {
+        int arp = udhcpc_is_ours(dhcp_fos6[0], "/sbin/busybox");
+        if (arp)
+            dhcp_fos6[7] = "-a";
+        netlog("dhcp: udhcpc, address conflict check %s\n",
+               arp ? "on" : "off (not emOS's busybox)");
+    }
     char **dhcp = vendor ? dhcp_fos6 : dhcp_fos5;
     int st = 0;
 

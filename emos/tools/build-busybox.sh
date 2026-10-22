@@ -130,6 +130,13 @@ for a in udhcpc ntpd syslogd klogd ifconfig route ip awk sed cut head sort \
         echo "applet $a is missing -- refusing" >&2; exit 1; }
 done
 
+# init gives THIS busybox's udhcpc -a, which ARP-checks an offered address
+# before using it (#871). It exists only with FEATURE_UDHCPC_ARPING, on in
+# defconfig; a build without it would stop udhcpc at the option, and every
+# FireOS 6 Echo would boot with no address.
+./busybox udhcpc --help 2>&1 | grep -q -- '-a\[MSEC\]' || {
+    echo "udhcpc cannot ARP-check a lease (-a) -- refusing" >&2; exit 1; }
+
 # And the daemons really are gone: `make oldconfig` can re-enable a symbol that
 # something else selects, silently.
 for d in telnetd httpd inetd ftpd tftpd dnsd udhcpd dhcprelay tcpsvd udpsvd \
