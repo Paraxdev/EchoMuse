@@ -1798,7 +1798,7 @@ function HomeTab({ device, globalConfig, release, ctrlRelease, activity, isAdmin
 // ─── Device detail modal ──────────────────────────────────────────────────────
 
 function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDeviceConfigChange,
-                  ctrlRelease }) {
+                  onGlobalConfigChange, soloFleet = false, ctrlRelease }) {
   const [tab, setTab] = useState(() => device.approved ? 'home' : 'approve');
   // Seed from the EFFECTIVE config, not the raw stored one — see
   // effectiveConfig(). A migrated row's stored dict is not the truth.
@@ -1927,6 +1927,42 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
   }, [tab, device.device_id]);
 
   function setConf(k, v) { setConfig(c => ({ ...c, [k]: v })); setDirty(true); }
+
+  // One Echo has no fleet to differ from, so its Config tab edits the fleet
+  // config itself, through the same save as Settings, with no Scope
+  // switches. Only while it overrides nothing: a fleet edit to a section a
+  // device overrides saves, says pushed, and changes nothing on that device
+  // (#857), so an Echo with overrides keeps the scoped form and its Revert
+  // all to fleet until it is back on the fleet.
+  const solo = soloFleet && device.approved && !!globalConfig
+    && (device.config_sections ?? []).length === 0;
+  const [fleetCfg, setFleetCfg]     = useState(() => ({ ...(globalConfig || {}) }));
+  const [fleetDirty, setFleetDirty] = useState(false);
+  const [fleetMsg, setFleetMsg]     = useState(null);   // {ok, text}
+  // An edit made while a save is in flight is not saved by that save's reply
+  // (SettingsPanel's UAT 2026-09-27 fault).
+  const fleetEditedDuringSave = useRef(false);
+  useEffect(() => {
+    if (!fleetDirty && globalConfig) setFleetCfg({ ...globalConfig });
+  }, [globalConfig]);
+  function setFleetConf(k, v) {
+    setFleetCfg(c => ({ ...c, [k]: v })); setFleetDirty(true); setFleetMsg(null);
+    fleetEditedDuringSave.current = true;
+  }
+  async function saveFleetConfig() {
+    setSaving(true);
+    fleetEditedDuringSave.current = false;
+    try {
+      const res = await API.post('/api/global/config', fleetCfg);
+      if (onGlobalConfigChange) onGlobalConfigChange(fleetCfg);
+      setFleetDirty(fleetEditedDuringSave.current);
+      const n = res.pushed_to?.length ?? 0;
+      setFleetMsg({ ok: true, text: n > 0 ? 'Saved and pushed live' : 'Saved' });
+    } catch (e) {
+      setFleetMsg({ ok: false, text: e.error || 'Failed to save config' });
+    }
+    setSaving(false);
+  }
 
   async function doCheckRelease() {
     setCheckingRelease(true);
@@ -2671,6 +2707,58 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 <ConnectivityTab device={device} row={row}/>
               </div>
 
+              {(() => {
+                // What this Echo can do, whichever config the form edits: a
+                // control its firmware lacks is disabled with the reason
+                // either way.
+                const caps = {
+                  shadowCapable: !device.connected || !!device.owwShadowCapable,
+                  triggerCapable: !device.connected || !!device.owwTriggerCapable,
+                  localCapable: !device.connected || !!device.owwLocalCapable,
+                  listen: device.connected ? device.listen : null,
+                  wakeCueCapable: !device.connected || !!device.wakeCueCapable,
+                  volumeCueCapable: !device.connected || !!device.volumeCueCapable,
+                  remoteVolumeArcCapable: !device.connected || !!device.remoteVolumeArcCapable,
+                  responseLevelCapable: !device.connected || !!device.responseLevelCapable,
+                  wakeMicCapable: !device.connected || !!device.wakeMicCapable,
+                  sendspinCapable: !device.connected || !!device.sendspinCapable,
+                  sendspinPanel: device.connected && device.sendspinCapable
+                    ? <SendspinPairing deviceId={device.device_id} status={device.sendspin} isAdmin={isAdmin}/>
+                    : null,
+                  bleConnectCapable: !device.connected || !!device.bleConnectCapable,
+                  blePanel: device.connected && device.bleConnectCapable
+                    ? <BleProxyKey deviceId={device.device_id} status={device.bleProxy} isAdmin={isAdmin}/>
+                    : null,
+                  mixCapable: !device.connected || !!device.audioMixCapable,
+                  holdCapable: !device.connected || !!device.buttonHoldCapable,
+                  hwRefCapable: !device.connected || !!device.aecHwRefCapable,
+                };
+                if (solo) return (
+                  <>
+                    <div className="em-field__help" style={{ marginBottom: 'var(--space-8)' }}>
+                      This is the only Echo, so these are the fleet settings. Another Echo added later starts from them.
+                    </div>
+                    <DeviceConfigForm config={fleetCfg} onChange={setFleetConf} disabled={!isAdmin}
+                      {...caps} hwEchoRef={device.connected && device.aecRef === 'hw'}/>
+                    {isAdmin && fleetDirty && (
+                      <div style={{ display: 'flex', gap: 'var(--space-5)', marginTop: 'var(--space-12)' }}>
+                        <Pill accent disabled={saving} onClick={saveFleetConfig}>
+                          {saving ? 'Saving…' : 'Save'}
+                        </Pill>
+                        <Pill onClick={() => { setFleetCfg({ ...globalConfig }); setFleetDirty(false); setFleetMsg(null); }}>
+                          Cancel
+                        </Pill>
+                      </div>
+                    )}
+                    {fleetMsg && (
+                      <div style={{ marginTop: 'var(--space-7)', fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-md)',
+                                    color: fleetMsg.ok ? 'var(--ok)' : 'var(--error)' }}>
+                        {fleetMsg.ok ? '✓ ' : ''}{fleetMsg.text}
+                      </div>
+                    )}
+                  </>
+                );
+                return (<>
               {/* Scoping summary. Each section below carries its own
                   Fleet/Device switch — this is just the roll-up plus a way
                   back to fully inheriting. */}
@@ -2707,27 +2795,8 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 onChange={(k, v) => setConf(k, v)}
                 disabled={!isAdmin}
                 sections={sections}
-                shadowCapable={!device.connected || !!device.owwShadowCapable}
-                triggerCapable={!device.connected || !!device.owwTriggerCapable}
-                localCapable={!device.connected || !!device.owwLocalCapable}
-                listen={device.connected ? device.listen : null}
-                wakeCueCapable={!device.connected || !!device.wakeCueCapable}
-                volumeCueCapable={!device.connected || !!device.volumeCueCapable}
-                remoteVolumeArcCapable={!device.connected || !!device.remoteVolumeArcCapable}
-                responseLevelCapable={!device.connected || !!device.responseLevelCapable}
-                wakeMicCapable={!device.connected || !!device.wakeMicCapable}
-                sendspinCapable={!device.connected || !!device.sendspinCapable}
-                sendspinPanel={device.connected && device.sendspinCapable
-                  ? <SendspinPairing deviceId={device.device_id} status={device.sendspin} isAdmin={isAdmin}/>
-                  : null}
-                bleConnectCapable={!device.connected || !!device.bleConnectCapable}
-                blePanel={device.connected && device.bleConnectCapable
-                  ? <BleProxyKey deviceId={device.device_id} status={device.bleProxy} isAdmin={isAdmin}/>
-                  : null}
-                mixCapable={!device.connected || !!device.audioMixCapable}
-                holdCapable={!device.connected || !!device.buttonHoldCapable}
+                {...caps}
                 hwEchoRef={device.connected && device.aecRef === 'hw'}
-                hwRefCapable={!device.connected || !!device.aecHwRefCapable}
                 onScopeChange={(id, local) => {
                   setSections(prev => local
                     ? [...prev, id]
@@ -2748,6 +2817,8 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                   }}>Cancel</Pill>
                 </div>
               )}
+                </>);
+              })()}
             </div>
           )}
 
@@ -9822,6 +9893,15 @@ function ScopeToggle({ local, onChange, disabled }) {
   );
 }
 
+// A stage that cannot be edited here, as its style. Read-only without
+// opacity: dimming took the inherited values to 1.2-1.9:1, which is why
+// controller/CLAUDE.md forbids dimming text that way. Two objects rather
+// than one so Stage can tell a section that follows the fleet (said on the
+// stage, with where to change it) from an account that cannot edit at all
+// (said once, at the top of the form).
+const READ_ONLY     = { pointerEvents: 'none' };
+const FOLLOWS_FLEET = { pointerEvents: 'none' };
+
 function Stage({ n, title, chips, desc, children, scope, dim, after }) {
   return (
     <Panel>
@@ -9833,6 +9913,11 @@ function Stage({ n, title, chips, desc, children, scope, dim, after }) {
         <div style={{ display: 'flex', gap: 'var(--space-3)', alignItems: 'center' }}>{chips}{scope}</div>
       </div>
       <div style={{ fontFamily: STAGE_MONO, fontSize: 'var(--fs-sm)', color: 'var(--muted)', lineHeight: 1.6, marginBottom: 'var(--space-7)' }}>{desc}</div>
+      {dim === FOLLOWS_FLEET && (
+        <div className="em-field__help" style={{ color: 'var(--accent)' }}>
+          Follows the fleet. Set Scope to Device to change it for this Echo only, or change it for every Echo in Settings.
+        </div>
+      )}
       {/* dim: a section following the fleet is shown read-only rather than
           hidden, so you can still see what it is inheriting. */}
       <div style={dim}>{children}</div>
@@ -9937,15 +10022,13 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
     onChange(k, v);
   };
 
-  // Per-stage props: the Fleet/Device switch, and the dimming for a stage
-  // that is currently inheriting.
+  // Per-stage props: the Fleet/Device switch, and the read-only style for a
+  // stage that is currently inheriting.
   const scopeEl = id => scoped
     ? <ScopeToggle local={isLocal(id)} disabled={disabled}
         onChange={local => onScopeChange && onScopeChange(id, local)}/>
     : null;
-  const secStyle = id => (disabled || !isLocal(id))
-    ? { opacity: 0.45, pointerEvents: 'none' }
-    : {};
+  const secStyle = id => disabled ? READ_ONLY : !isLocal(id) ? FOLLOWS_FLEET : {};
 
   // Derive current mic preset from beamAngle
   const angle = config.beamAngle ?? -1;
@@ -10091,7 +10174,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
   const [advRing, setAdvRing] = useState(false);
   const [advPlay, setAdvPlay] = useState(false);
 
-  const inputStyle = disabled ? { opacity: 0.45, pointerEvents: 'none' } : {};
+  const inputStyle = disabled ? READ_ONLY : {};
   const mono = "var(--font-mono)";
 
   // Small header for subsections inside the combined Advanced stage.
@@ -10107,6 +10190,12 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
   // switched to relevance.)
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
+
+      {disabled && (
+        <div className="em-field__help" style={{ color: 'var(--text2)' }}>
+          Read-only: changing these settings needs an admin account.
+        </div>
+      )}
 
       {/* 01 PLAYBACK */}
       <Stage n="01" title="Playback"
@@ -11814,6 +11903,8 @@ function App() {
           onApprove={() => API.get('/api/devices').then(setDevices).catch(() => {})}
           isAdmin={isAdmin}
           globalConfig={globalConfig}
+          onGlobalConfigChange={setGlobalConfig}
+          soloFleet={approved.length === 1}
           ctrlRelease={ctrlRelease}
           onDeviceConfigChange={(device_id, patch) =>
             setDevices(prev => prev.map(d =>
