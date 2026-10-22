@@ -270,7 +270,11 @@ so with Actions enabled the fork can publish `ghcr.io/paraxdev/echomuse-controll
 1. Enable Actions on Paraxdev/EchoMuse.
 2. A push to `main` that touches `controller/` runs "Controller Build (main)",
    which publishes `:sha-<commit>`. An annotated `controller-ea-vX.Y.Z-ea.N`
-   tag, pushed once that build is green, promotes it to `:X.Y.Z-ea.N`.
+   tag, pushed once that build is green, promotes it to `:X.Y.Z-ea.N`. The
+   release refuses a tag that differs from `controller-ea/config.yaml`'s
+   `version:`, so set that first, from `controller/`, with
+   `python tools/sync_channels.py --set-version X.Y.Z-ea.N`, and pick numbers
+   upstream has not used.
 3. Make the GHCR package public; a new package is private, and Supervisor
    cannot pull a private one.
 
