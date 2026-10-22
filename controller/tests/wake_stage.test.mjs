@@ -44,6 +44,11 @@ check("on is read case-insensitively", wakeDetector({ owwOnDevice: "ON" }, true)
 check("on without oww_trigger runs as shadow",
       wakeDetector({ owwOnDevice: "on" }, false) === "both");
 check("shadow is both", wakeDetector({ owwOnDevice: "shadow" }, true) === "both");
+check("firmware without oww_shadow scores nothing, so the controller alone listens",
+      wakeDetector({ owwOnDevice: "on" }, false, false) === "controller"
+      && wakeDetector({ owwOnDevice: "shadow" }, false, false) === "controller");
+check("shadowCapable defaults true, as the form's prop does",
+      wakeDetector({ owwOnDevice: "shadow" }, false) === "both");
 
 // The gate, lifted from the form so the test reads the expression in use.
 const gate = src.match(/const patienceOff = ([^;]+);/);
@@ -57,8 +62,8 @@ check("the controller deciding is live whatever the firmware",
       patienceOff("controller", false) === false && patienceOff("both", false) === false);
 
 const wakeBy = src.match(/const wakeBy = ([^;]+);/);
-check("wakeBy comes from wakeDetector with the trigger capability",
-      wakeBy && wakeBy[1].trim() === "wakeDetector(config, triggerCapable)");
+check("wakeBy comes from wakeDetector with the trigger and shadow capabilities",
+      wakeBy && wakeBy[1].trim() === "wakeDetector(config, triggerCapable, shadowCapable)");
 
 // The chips follow wakeBy rather than being fixed.
 check("the Controller chip is hidden only where the Echo decides",

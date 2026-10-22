@@ -9616,11 +9616,12 @@ function onDeviceMode(config) {
 // Who decides a wake, resolved the way em_shadow.effective_mode resolves it:
 // "on" against firmware that cannot trigger runs as shadow, so the controller
 // still decides there. 'both' is shadow: the controller decides and the Echo
-// scores beside it for comparison.
-function wakeDetector(config, triggerCapable) {
+// scores beside it for comparison. Firmware without oww_shadow scores nothing,
+// so there the controller is the only one listening, whatever the setting.
+function wakeDetector(config, triggerCapable, shadowCapable = true) {
   const mode = onDeviceMode(config);
-  if (mode === 'on') return triggerCapable ? 'device' : 'both';
-  return mode === 'shadow' ? 'both' : 'controller';
+  if (mode === 'off' || !shadowCapable) return 'controller';
+  return mode === 'on' && triggerCapable ? 'device' : 'both';
 }
 
 // What an Echo is actually doing with its microphone, from its own report
@@ -9803,7 +9804,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
   const wakeT = config.owwThreshold ?? 0.5;
   // An Echo that decides its own wakes applies owwPatience only on firmware
   // announcing oww_patience; anywhere the controller decides, it applies it.
-  const wakeBy = wakeDetector(config, triggerCapable);
+  const wakeBy = wakeDetector(config, triggerCapable, shadowCapable);
   const patienceOff = wakeBy === 'device' && !patienceCapable;
 
   const bands = config.eqBands ?? [0,0,0,0,0,0,0,0];
