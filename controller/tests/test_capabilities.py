@@ -172,7 +172,7 @@ def test_patience_is_gated_on_its_capability_where_the_echo_decides():
     assert em_wakepatience.CAPABILITY == "oww_patience"
     assert "owwPatienceCapable" in _device_record()
     jsx = (ROOT / "controller" / "static" / "dashboard.jsx").read_text()
-    assert "patienceCapable={!device.connected || !!device.owwPatienceCapable}" in jsx
+    assert re.search(r"patienceCapable(?:=\{|: )!device\.connected \|\| !!device\.owwPatienceCapable", jsx)
     assert "disabled={patienceOff}" in jsx
     gate = re.search(r"const patienceOff = ([^;]+);", jsx)
     assert gate and "wakeBy === 'device'" in gate.group(1) \
