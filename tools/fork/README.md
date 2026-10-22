@@ -82,12 +82,13 @@ sh tools/fork/build_app.sh --fingerprint controller-ea-v2.28.0-ea.1
 
 ## First time: deploy, migrate, verify
 
-**0. Get the fork onto the Proxmox host.** Either a clone (the version then
+**0. Get the fork onto the Proxmox host.** The branch to deploy is
+`paraxdev/fixes`: the fixes and these tools. Either a clone (the version then
 names the commit):
 
 ```sh
 apt install git        # if it is missing
-git clone --branch fork/forkops https://github.com/Paraxdev/EchoMuse /root/EchoMuse
+git clone --branch paraxdev/fixes https://github.com/Paraxdev/EchoMuse /root/EchoMuse
 cd /root/EchoMuse
 ```
 
@@ -95,11 +96,18 @@ Or no clone at all: fetch `pve.sh` alone and let the VM clone and build, with
 `deploy --git` in step 1.
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/Paraxdev/EchoMuse/refs/heads/fork/forkops/tools/fork/pve.sh
+curl -fsSLO https://raw.githubusercontent.com/Paraxdev/EchoMuse/refs/heads/paraxdev/fixes/tools/fork/pve.sh
 ```
 
-Both need the branch pushed to GitHub. From Windows, run any of the commands
-below through `ssh pve '...'`.
+Both need the branch pushed to GitHub. From Windows, run the commands below
+through ssh. A command sent that way starts in `/root`, so change to the
+clone first:
+
+```sh
+ssh pve 'cd /root/EchoMuse && sh tools/fork/pve.sh deploy'
+```
+
+(The `pve.sh` fetched on its own is in `/root` already: `ssh pve 'sh pve.sh ...'`.)
 
 **1. Build and install the app.** It is installed stopped, with start on
 boot off, and the upstream app keeps running.
@@ -108,7 +116,7 @@ boot off, and the upstream app keeps running.
 sh tools/fork/pve.sh deploy --dry-run   # optional: build and pack only, sends nothing
 sh tools/fork/pve.sh deploy
 # or, without a clone:
-sh pve.sh deploy --git https://github.com/Paraxdev/EchoMuse --ref fork/forkops
+sh pve.sh deploy --git https://github.com/Paraxdev/EchoMuse --ref paraxdev/fixes
 ```
 
 The output arrives when Supervisor has finished building (a minute or two).
@@ -124,7 +132,10 @@ In order (`pve.sh` prints the steps when the run ends, which can take a few
 minutes; interrupting `pve.sh` does not stop the run in the VM, and a second
 run refuses to start until the first has ended):
 
-1. stops `acc06409_controller-ea` and turns off its start at boot;
+1. stops `acc06409_controller-ea` and turns off its start at boot. Supervisor
+   then reports it as `error`, not `stopped`, because the controller does not
+   exit cleanly when it is stopped, so the script waits instead until no
+   running container has its data folder mounted;
 2. refuses to go on while any running container still has its data folder
    mounted, whatever Supervisor reports;
 3. stops the fork app; if Supervisor has not created its data folder yet,
@@ -153,7 +164,8 @@ fork has; refused when nothing was ever migrated).
 **3. Verify.** The migration ends with this checklist:
 
 - Settings > Apps: "EchoMuse (Paraxdev fork)" started with Start on boot on;
-  "EchoMuse (Early Access)" stopped with Start on boot off.
+  "EchoMuse (Early Access)" stopped with Start on boot off (it may show as
+  failed, for the reason in step 1 above).
 - The fork's log reads `Opening database: /data/echomuse.db`, then
   `Controller ready`, with no Traceback (`sh tools/fork/pve.sh status --logs 40`).
 - The "EchoMuse fork" sidebar entry opens the dashboard and its header shows
@@ -172,7 +184,9 @@ sh tools/fork/pve.sh rollback
 ```
 
 Stops the fork and turns off its start at boot, turns on the upstream app's
-and starts it. Nothing is deleted. Two things to know:
+and starts it. Nothing is deleted. If it stops part way, it prints which app
+may be stopped with which boot setting, and how to start one of them by hand.
+Three things to know:
 
 - Anything changed while on the fork (device settings, a new wake word model,
   history) exists only in the fork's data folder.
@@ -181,6 +195,11 @@ and starts it. Nothing is deleted. Two things to know:
   has never seen, and the upstream controller refuses it. Remove it in the
   upstream dashboard and approve it again, or hold the action button for 5
   seconds and approve the pairing request.
+- An Echo on fork firmware keeps the fork's Patience (default 2) until it
+  restarts, because the upstream controller never sends `owwPatience`. If the
+  Echo detects its own wake word (Wake word set to On this Echo, or shadow),
+  set Patience to 1 in the fork dashboard (Config > Wake word) before rolling
+  back, or restart the Echo afterwards.
 
 ## After a new commit
 
@@ -190,10 +209,18 @@ sh tools/fork/pve.sh deploy
 ```
 
 The version names the new commit, so Supervisor runs an update: it builds the
-new image and, if the fork app was running, restarts it on it. The data
-folder is untouched. The same commit deployed twice is a rebuild. If
-`build_app.sh` refuses the overlay because the image inputs changed, deploy
-with `--full`.
+new image first and, if the fork app was running, restarts it on it. The data
+folder is untouched. If `build_app.sh` refuses the overlay because the image
+inputs changed, deploy with `--full`.
+
+The same commit deployed twice is a rebuild, and so is every deploy of a tree
+with uncommitted changes (its version ends in `-dirty`). Supervisor rebuilds
+by removing the app's image before it builds, so **a rebuild stops a running
+fork for the length of the build**, and leaves it with no image if the build
+fails. `deploy` therefore refuses to rebuild the fork while it runs. Deploy a
+new commit instead (an update), or rebuild anyway with
+`sh tools/fork/pve.sh deploy --force`; if that build fails,
+`sh tools/fork/pve.sh rollback` starts the upstream app.
 
 `sh tools/fork/pve.sh status` shows both apps, their data folders, the
 migration record and the backups. Backups are never deleted by these
@@ -236,7 +263,10 @@ fork firmware needs no release:
    would start a release workflow for every one of them once Actions is
    enabled.
 
-2. Upload it: dashboard > the Echo > **Updates** > **Local Build** > Choose
+2. Upload it. First turn on Settings > System > **Show developer tools**
+   (under This browser): it is per browser, so turn it on again in the Home
+   Assistant companion app, and without it the Updates tab has no Local
+   Build. Then dashboard > the Echo > **Updates** > **Local Build** > Choose
    file > Deploy. That is `POST /api/releases/upload` (admin, multipart field
    `binary`), which returns an `upload_token` and the version read from the
    binary, then `POST /api/devices/<id>/update` with that token. It goes to the
@@ -251,6 +281,68 @@ On a lossy WiFi link the transfer can fail with a keepalive timeout; the
 running firmware is untouched (the copy is checked by md5 before the switch),
 so retry when the link is good.
 
+## emOS built from the fork
+
+Only for an Echo running emOS, and **do it last**, once the controller and
+the firmware are settled. It rewrites the Echo's boot partition, which makes
+it the riskiest step here: the one that can leave an Echo needing TWRP and a
+USB cable.
+
+The controller updates emOS by rebuilding the Echo's own boot image around a
+new init (`controller/CLAUDE.md`, "emOS update"), so what it needs from the
+fork is a payload bundle, `emos-payload.zip`, holding the init and emOS's own
+`/sbin` tools:
+
+1. Compile the init in the pinned compiler image, as `emos/build.sh` and the
+   emOS release do, and bundle it with `emos/tools/make-payload-bundle.py`:
+
+   ```sh
+   docker build -t echomuse-compiler device/compiler/     # if not built yet
+   git fetch https://github.com/wilbowes/EchoMuse 'refs/tags/emos-v*:refs/tags/emos-v*'
+   NDK=/opt/android/ndk/21.4.7075529/toolchains/llvm/prebuilt/linux-x86_64/bin
+   mkdir -p emos/build
+   docker run --rm -v "$PWD/emos":/emos -w /emos echomuse-compiler bash -lc \
+     "$NDK/aarch64-linux-android21-clang -static -O2 -Wall -o build/init init/init.c"
+   python3 emos/tools/make-payload-bundle.py "$(git describe --tags --match 'emos-v*' --dirty)" \
+     emos/build/emos-payload.zip emos/build/init emos/device/em-wifi
+   ```
+
+   That bundle is for an Echo on FireOS 5 (amonet 1, a 64-bit kernel), which
+   takes `init` and `em-wifi`. An Echo on FireOS 6 (amonet 2) needs `init32`
+   (the same compile with `armv7a-linux-androideabi21-clang` and
+   `-o build/init32`) and all four of `wpa_supplicant`, `wpa_cli`, `em-wifi`
+   and `busybox`, built as `.github/workflows/emos-release.yml` builds them;
+   the controller refuses a FireOS 6 payload that lacks any of them.
+
+   The tag fetch is for the version, as with the firmware. It becomes the
+   image's `/etc/os-release`, and with the tags it reads like
+   `emos-v0.10-6-g1a2b3c4`, which the Updates tab orders after `emos-v0.10`,
+   so that release is not offered over it (a newer upstream one is). Without
+   the tags the version is empty, the controller labels the image
+   `local-<time>`, and the Updates tab cannot order it against any release.
+
+2. Upload it. Developer tools must be on, as for Local Build above (Settings >
+   System > Show developer tools, per browser, so again in the companion
+   app). Then the Echo > **Updates** > emOS > **Local payload** > choose the
+   zip > Install. That is `POST /api/emos/upload` (admin, multipart field
+   `payload`), which returns an `upload_token`, then
+   `POST /api/devices/<id>/emos_update` with it. The Echo restarts on the new
+   image. Keep it powered, and keep the fork controller running until the
+   Echo is back on the new build.
+
+3. The undo is init's own trial boot. The controller marks the new image as
+   on trial before it writes it, and clears the mark once the Echo has
+   registered again on that build. Until then init does not count a boot as
+   good: it restarts after 180 seconds, and after three tries (about ten
+   minutes) it writes the previous image back from `/data/emos/boot-good.img`
+   and boots that. There is **no manual roll-back button**: once the new
+   image is confirmed, going back means installing another payload, such as
+   one built from an upstream `emos-v*` tag. A controller that is down
+   through the trial costs a good update its place (it is rolled back and has
+   to be retried). An image that fails before init runs, or a power cut
+   during the second or so of the write, is beyond the trial and needs TWRP
+   and a cable.
+
 ## Why the release source stays `wilbowes/EchoMuse`
 
 Settings > System > Release source (`github_repo`) is one setting behind three
@@ -260,8 +352,9 @@ tags). A GitHub fork copies none of those, and this fork has published none,
 so pointing the setting at `Paraxdev/EchoMuse` today would empty all three:
 no firmware offered, no emOS update, no notice. Leave it on
 `wilbowes/EchoMuse` until the fork publishes its own `v*` and `emos-v*`
-releases in upstream's tag shapes, and use Local Build for fork firmware until
-then.
+releases in upstream's tag shapes, and until then use Local Build for fork
+firmware and Local payload for fork emOS, both of which need Settings >
+System > Show developer tools on in the browser you use.
 
 ## Publishing the fork's own image (later)
 
@@ -316,6 +409,11 @@ host" in `docs/faq.md`.
   by the next run.
 - `hassio_cli has no curl, jq or SUPERVISOR_TOKEN`: the scripts need those in
   that container to reach Supervisor, and stop before changing anything.
-- A migration that stops part way prints what state it left and the command
-  that goes back. The upstream data folder is never written.
+- A migration or rollback that stops part way prints what state it left and
+  what to do next. The upstream data folder is never written.
+- `... still mounted by: <container>`: an app was stopped but a container
+  still has its data folder after two minutes, so nothing was copied or
+  started beside it. `docker ps` in the VM shows the container.
+- `this deploy would be a rebuild`: the fork is running the version being
+  deployed; see "After a new commit" above.
 - Supervisor's own log: `qm guest exec 100 -- docker exec hassio_cli ha supervisor logs`.
