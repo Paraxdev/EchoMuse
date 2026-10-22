@@ -4298,7 +4298,7 @@ async function _sha256Hex(buf) {
 // 10  wifi             — configure WiFi network                            [inputs]
 // 11  install_em       — push binary + startup script                      [file]
 const _WIZARD_STEPS = [
-  { id: 'connect_android', label: 'Connect Device',     desc: 'Connect the Echo Dot via USB. Device should be on and booted into Android. Appears as "AEOBC" in the USB picker.' },
+  { id: 'connect_android', label: 'Connect Device',     desc: 'Plug the Echo Dot by USB into the computer running this browser (Chrome or Edge), not the Home Assistant host. Device should be on and booted into Android. Appears as "AEOBC" in the USB picker.' },
   { id: 'connect_twrp',    label: 'Connect to TWRP',   desc: 'Wait for TWRP recovery to appear, then reconnect. Appears as "Echo" in the USB picker.' },
   { id: 'patch_boot',      label: 'Patch Boot Image',  desc: 'Apply SELinux permissive patch and add init.rc service entries.' },
   { id: 'install_magisk',  label: 'Install Magisk',    desc: 'Flash Magisk 17.3 for persistent root access.' },
@@ -4368,7 +4368,7 @@ function _wizardLogClass(msg, type) {
 // wpa_supplicant — the real radio, so a network this hardware cannot join is
 // refused at pick time rather than after a flash.
 const _EMOS_STEPS = [
-  { id: 'connect_android', label: 'Connect Device',    desc: 'Connect the Echo Dot via USB. It can be booted into Android or already in TWRP. Appears as "AEOBC" (Android) or "Echo" (TWRP) in the USB picker.' },
+  { id: 'connect_android', label: 'Connect Device',    desc: 'Plug the Echo Dot by USB into the computer running this browser (Chrome or Edge), not the Home Assistant host. It can be booted into Android or already in TWRP. Appears as "AEOBC" (Android) or "Echo" (TWRP) in the USB picker.' },
   { id: 'connect_twrp',    label: 'Connect to TWRP',   desc: 'Wait for the device to reach TWRP, then reconnect — it appears as "Echo" in the USB picker. Everything after this happens there.' },
   { id: 'escrow_boot',     label: 'Escrow Boot Image', desc: 'Read the stock boot partition off the device and keep a copy. This one file is both the build input and your backup if we need to roll back.' },
   { id: 'install_em',      label: 'Install EchoMuse',  desc: 'Push the server binary, startup script and TLS credentials to /data, which survives the boot-partition write.' },
@@ -11337,7 +11337,7 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
                 Settings for this controller. Nothing here is pushed to a device.
               </div>
 
-              {!sys && !sysMsg && <div className="help">Loading…</div>}
+              {!sys && !sysMsg && <div className="em-field__help">Loading…</div>}
 
               {sys && (() => {
                 const secs     = Number(sysVal('update_check_interval', '3600'));
@@ -11462,7 +11462,7 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
                     : <Pill accent onClick={() => setUserRole(u.id, 'admin')}>Promote to admin</Pill>}
                 </div>
               ))}
-              {!users && !usersMsg && <div className="help">Loading…</div>}
+              {!users && !usersMsg && <div className="em-field__help">Loading…</div>}
               {usersMsg && (
                 <div style={{ marginTop: 'var(--space-7)', fontFamily: "var(--font-mono)", fontSize: 'var(--fs-md)',
                   color: usersMsg.ok ? 'var(--ok)' : 'var(--error)' }}>
@@ -11852,6 +11852,16 @@ function App() {
                 color:'var(--text2)', whiteSpace:'pre-wrap', wordBreak:'break-word',
                 margin:0, maxHeight:320, overflowY:'auto',
               }}>{ctrlRelease.notes}</pre>
+              {/* Under ingress this is the Home Assistant app, which
+                  Supervisor updates; there is no compose file to run a
+                  command beside. */}
+              {isIngress() ? (
+                <div style={{ fontFamily:"var(--font-sans)", fontSize:'var(--fs-sm)', color:'var(--text2)',
+                              marginTop:'var(--space-7)', lineHeight:1.6 }}>
+                  Update it in Home Assistant: Settings, then Apps (Add-ons on older
+                  versions), then the EchoMuse app, then Update.
+                </div>
+              ) : (<>
               <div style={{ fontFamily:"var(--font-mono)", fontSize:'var(--fs-xs)', color:'var(--muted)',
                             marginTop:'var(--space-7)', lineHeight:1.6 }}>
                 Update it yourself, from wherever your compose file lives:
@@ -11861,6 +11871,7 @@ function App() {
                 background:'rgba(0,0,0,0.35)', border:'1px solid rgba(0,0,0,0.5)',
                 borderRadius:'var(--radius-md)', padding:'var(--space-5) var(--space-6)', margin:'var(--space-4) 0 0', overflowX:'auto',
               }}>docker compose pull &amp;&amp; docker compose up -d</pre>
+              </>)}
               {ctrlRelease.release_url && (
                 <a href={ctrlRelease.release_url} target="_blank" rel="noreferrer"
                    style={{ fontFamily:"var(--font-mono)", fontSize:'var(--fs-xs)', color:'var(--muted)',
