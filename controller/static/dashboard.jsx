@@ -243,14 +243,22 @@ let _devTools = (() => {
   try { return localStorage.getItem(DEV_TOOLS_KEY) === '1'; } catch (e) { return false; }
 })();
 const _devToolsSubs = new Set();
+function _announceDevTools() { _devToolsSubs.forEach(fn => fn(_devTools)); }
 function setDevTools(on) {
   _devTools = !!on;
   try {
     if (_devTools) localStorage.setItem(DEV_TOOLS_KEY, '1');
     else localStorage.removeItem(DEV_TOOLS_KEY);
   } catch (e) { /* private mode */ }
-  _devToolsSubs.forEach(fn => fn(_devTools));
+  _announceDevTools();
 }
+// The switch flipped in another window of this browser, which is the only
+// way it changes under an open device view; key null is storage cleared.
+window.addEventListener('storage', e => {
+  if (e.key !== DEV_TOOLS_KEY && e.key !== null) return;
+  _devTools = e.newValue === '1' && e.key === DEV_TOOLS_KEY;
+  _announceDevTools();
+});
 function useDevTools() {
   const [on, setOn] = useState(_devTools);
   useEffect(() => {
@@ -1382,7 +1390,7 @@ function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMis
                 {/* The keyboard's way in, as its own button: the row holds the
                     play and download buttons, and a row that was a button
                     itself would nest them. */}
-                <button type="button" onClick={() => togglePin(t)} aria-expanded={shown === i}
+                <button type="button" onClick={() => togglePin(t)} aria-expanded={pinnedAt === i}
                   title="Show this turn's detail"
                   style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontFamily: mono, fontSize: 'var(--fs-xs)', color: 'var(--muted)', minWidth: '8ch', flexShrink: 0, textAlign: 'right', whiteSpace: 'nowrap' }}>{time}</button>
                 <div style={{ flex: 1, display: 'flex', height: 14, alignItems: 'stretch' }}>
