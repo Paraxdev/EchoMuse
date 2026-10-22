@@ -1307,6 +1307,10 @@ func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient,
 	if sc := dc.ShadowScorer(); sc != nil && shadowState.model == model &&
 		shadowState.streamSig == streamSig {
 		sc.SetThreshold(threshold)
+		if snap.OwwPatience > 0 && sc.Patience() != snap.OwwPatience {
+			sc.SetPatience(snap.OwwPatience)
+			log.Printf("[shadow] patience now %d frame(s)", sc.Patience())
+		}
 		if snap.BargeInEnabled != nil && *snap.BargeInEnabled && spk != nil {
 			sc.SetBargeThreshold(float32(snap.BargeInThreshold), speakerPlaying(spk))
 		} else {
@@ -1341,6 +1345,7 @@ func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient,
 	if snap.BargeInEnabled != nil && *snap.BargeInEnabled && spk != nil {
 		sc.SetBargeThreshold(float32(snap.BargeInThreshold), speakerPlaying(spk))
 	}
+	sc.SetPatience(snap.OwwPatience)
 	if spk != nil && benchScorer != nil {
 		benchScorer(sc, spk)
 	}
@@ -1351,8 +1356,8 @@ func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient,
 	if snap.BargeInEnabled != nil && *snap.BargeInEnabled {
 		bargeNote = fmt.Sprintf("barge-in bar %.2f", snap.BargeInThreshold)
 	}
-	log.Printf("[shadow] on-device wake word scoring (%s, threshold %.2f, %s) — %s",
-		sc.Info(), threshold, bargeNote, actsOnCrossings(mode))
+	log.Printf("[shadow] on-device wake word scoring (%s, threshold %.2f over %d frame(s), %s): %s",
+		sc.Info(), threshold, sc.Patience(), bargeNote, actsOnCrossings(mode))
 }
 
 // speakerPlaying is when the wake bar drops to bargeInThreshold: a response,

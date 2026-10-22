@@ -34,6 +34,10 @@ type Device struct {
 	// Wake word
 	OwwThreshold float64
 	OwwModel     string
+	// OwwPatience is how many consecutive 80ms frames the on-device scorer
+	// needs at the wake threshold before it fires (shadow.Scorer.SetPatience).
+	// 1, the default, is the single frame it has always fired on.
+	OwwPatience int
 	// BargeInEnabled / BargeInThreshold mirror the controller's barge-in
 	// settings. The device needs them for on-device scoring: while the speaker
 	// is streaming, the controller lowers its wake bar to BargeInThreshold
@@ -215,6 +219,7 @@ func (d *Device) loadDefaults() {
 	d.VolumeButtonSound = envBool("VOLUME_BUTTON_SOUND", true)
 	d.OwwThreshold = envFloat("OWW_THRESHOLD", 0.5)
 	d.OwwModel = envStr("OWW_MODEL", "hey_jarvis_v0.1")
+	d.OwwPatience = clampPatience(envInt("OWW_PATIENCE", 1))
 	d.OwwOnDevice = normaliseOnDevice(envStr("OWW_ON_DEVICE", OnDeviceOff))
 	d.BargeInThreshold = envFloat("BARGE_IN_THRESHOLD", 0.05)
 	d.WakeWordEnabled = true
@@ -274,6 +279,11 @@ func (d *Device) Apply(msg ConfigMessage) {
 	}
 	if msg.OwwModel != "" {
 		d.OwwModel = msg.OwwModel
+	}
+	// Zero is "not sent", so a controller that predates the key leaves the
+	// single-frame rule alone; 1 is how one turns patience back off.
+	if msg.OwwPatience > 0 {
+		d.OwwPatience = clampPatience(msg.OwwPatience)
 	}
 	if msg.OwwOnDevice != "" {
 		d.OwwOnDevice = normaliseOnDevice(msg.OwwOnDevice)
@@ -508,6 +518,7 @@ func (d *Device) Snapshot() ConfigMessage {
 		VadSilenceMs:        d.VadSilenceMs,
 		OwwThreshold:        d.OwwThreshold,
 		OwwModel:            d.OwwModel,
+		OwwPatience:         d.OwwPatience,
 		OwwOnDevice:         d.OwwOnDevice,
 		BargeInEnabled:      &bargeInEnabled,
 		BargeInThreshold:    d.BargeInThreshold,
@@ -555,6 +566,7 @@ type ConfigMessage struct {
 	VadSilenceMs   int     `json:"vadSilenceMs,omitempty"`
 	OwwThreshold   float64 `json:"owwThreshold,omitempty"`
 	OwwModel       string  `json:"owwModel,omitempty"`
+	OwwPatience    int     `json:"owwPatience,omitempty"`
 	OwwOnDevice    string  `json:"owwOnDevice,omitempty"`
 	// ConsolePassword is the hashed record emOS's init checks before handing
 	// over a shell on the USB serial console. A POINTER, and it has to be: an
@@ -724,6 +736,23 @@ func envStr(key string, def string) string {
 		return v
 	}
 	return def
+}
+
+// MaxOwwPatience mirrors shadow.MaxPatience (pinned by test): 10 frames is 0.8s,
+// about as long as a spoken wake word keeps its score over the bar, and a run
+// no wake word can sustain is a deaf device.
+const MaxOwwPatience = 10
+
+// clampPatience keeps owwPatience to 1..MaxOwwPatience.
+func clampPatience(n int) int {
+	if n < 1 {
+		return 1
+	}
+	if n > MaxOwwPatience {
+		log.Printf("[config] owwPatience %d is more than a wake word lasts; using %d", n, MaxOwwPatience)
+		return MaxOwwPatience
+	}
+	return n
 }
 
 // clampWakeMic keeps an out-of-range value on the centre mic (0) rather than

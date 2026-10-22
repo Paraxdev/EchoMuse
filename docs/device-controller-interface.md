@@ -123,6 +123,7 @@ below (`capabilities()` in `control.go`):
 | `buttons` | always | Emits `button` events |
 | `oww_shadow` | always | Can score the wake word locally and **report** (never act) |
 | `oww_trigger` | always | Can **act** on its own wake detection — kept separate from `oww_shadow` on purpose (see below) |
+| `oww_patience` | always | Reads `owwPatience` (1 to 10, larger values clamped to 10; it starts at 1, and absent or 0 leaves it unchanged, so send 1 to turn it off): its own wake word fires only after that many consecutive 80ms frames at the threshold in force, not on one. At the barge-in bar the device's two-frame rule applies when the patience is lower. Without it the device fires on a single frame whatever the setting, so a controller should show the setting disabled there |
 | `button_hold` | always | Emits long-press (`heldMs`) |
 | `audio_mix` | always | Holds music on its own frame types and mixes it under voice rather than pausing |
 | `oww_local_only` | always | Can listen **privately**: score its own wake word and send nothing until it fires. Whether it is doing so is `listen_state` — see [listening.md](listening.md) |
@@ -196,8 +197,8 @@ absent optional fields take prior/default behaviour.
 | `ambient_light` | `lux` | Light reading, sent on a real change (only if `ambient_light`); the ~30s `stats` report carries it as `ambientLux` |
 | `stats` | hardware and link telemetry (`internal/client/stats.go`, `DeviceStats`) | Every ~30s, plus once on connect. Every field is optional and absence means **not measured**, never zero. `tcpUpRetrans` is the device's own TCP retransmits across its planes since the last report, `tcpUpSegs` the segments sent where the kernel counts them (FireOS 5's 3.18 does not); `ble` carries the scanner's counters, including `yields`/`yieldedMs` for time the scan stood aside for the link |
 | `ble_adverts` | `adverts[]` | Batch from the passive BLE scanner. **Legacy path** — send these on `/data` as `0x06` whenever the controller announced `ble_adverts_data`, and use this message only when it did not (#404) |
-| `wifi_scan_result` | `networks[]` of `{ssid, ssid_hex, signal}`, or `error` | Answer to `wifi_scan` |
-| `wifi_result` | `ok`, `ssid`, `error?` | Outcome of a `wifi_change`, re-sent until `wifi_commit` |
+| `wifi_scan_result` | `networks[]` of `{ssid, ssid_hex, signal, freqs?, flags?}`, or `error` | Answer to `wifi_scan`. One entry per SSID, strongest first. `freqs` is every frequency the SSID was seen on (MHz, ascending) and `flags` the strongest BSS's security flags as wpa_supplicant prints them (`[WPA2-PSK+SAE-CCMP][ESS]`); both are absent from older firmware, and absent `freqs` means not reported, never "no band" |
+| `wifi_result` | `ok`, `ssid`, `error?` | Outcome of a `wifi_change`, re-sent until `wifi_commit`. A failure to associate says why where the device can tell: a fresh scan (whether the SSID was seen, on which frequencies, at what signal, with which flags and whether this radio can join that security), and on emOS the supplicant's own reason from `/run/net.log` (`WRONG_KEY`, an association reject, network not found). Prose for a person, not a field to parse |
 | `pair_request` | — | The owner held the action button on a connected device (only if `pairing`). The controller shows **Approve pairing**; approval issues a rotated token and the CA over the shell plane, then bounces the link |
 | `sendspin_status` | `status` (`sendspin.Status`), or null when the player stopped | The Sendspin player's state as it changes: `state` (`listening`, `connected`, `playing`, `busy` while Home Assistant holds the music plane, `error`), `server`, `paired`, `pairedWith`, `group`, `synced`, `syncErrUs`, `bufferedMs`, player counters. No secrets. The `stats` report carries the same object as `sendspin` |
 | `sendspin_token` | `token`, `clientId`, or `error` | Answer to `sendspin_token_request`. The token (`SP:0…`) carries the device's Sendspin pairing key: the controller hands it to the one waiting request and never logs or stores it |
@@ -234,7 +235,9 @@ one. `ssid` is for display (invalid UTF-8 shown as U+FFFD); `ssid_hex` is the
 exact bytes, reported in each scan result and sent back in `wifi_change` when
 the network came from a scan. A `wifi_change` without it means the UTF-8 of
 `ssid`. `psk` is empty for an open network, 8–63 printable ASCII characters,
-or a raw 64-hex PSK. Firmware that predates `ssid_hex` ignores it.
+or a raw 64-hex PSK. Firmware that predates `ssid_hex` ignores it. A network
+the device's own last scan did not see (hidden, or typed by hand) is written
+with `scan_ssid=1`, so the supplicant probes for it by name.
 
 ## `/data` — binary frames
 
@@ -389,7 +392,7 @@ The canonical field set (repo-root `CLAUDE.md`, "Device config push"):
 
 ```
 vadThreshold, vadSpeechMs, vadSilenceMs,
-owwThreshold, owwModel, owwSpeexNs, owwOnDevice,
+owwThreshold, owwModel, owwSpeexNs, owwOnDevice, owwPatience,
 adcDigitalGain, adcMicpga, micGainDb,
 startupVolume,
 beamAngle, beamformingEnabled,
