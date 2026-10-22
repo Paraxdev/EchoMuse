@@ -360,8 +360,9 @@ and its log says how many frames each wake held, and logs a run that was too
 short as "not a wake". An Echo set to **On this Echo** applies it only with
 firmware that supports it (it announces `oww_patience`); on older firmware
 the control is shown disabled with the reason, and that Echo wakes on a
-single frame. Patience does not apply to the lower **Barge threshold**, which
-has its own rule.
+single frame. Patience is for the normal threshold only: at the lower
+**Barge threshold** the controller keeps its old rules, two frames in a row
+over a reply (see Barge-in) and one while music plays or a timer rings.
 
 ### Barge-in
 Lets the wake word **interrupt the assistant mid-turn** — say the wake word

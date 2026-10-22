@@ -171,7 +171,7 @@ def test_env_fallback_note_names_what_differs_and_what_runs():
     note = owm.env_fallback_note(
         {"OWW_MODEL": "hey_jarvis", "OWW_THRESHOLD": "0.5"}, FLEET)
     assert note.startswith("OWW_MODEL=hey_jarvis and OWW_THRESHOLD=0.5 ")
-    assert "not in effect" in note
+    assert "are fallbacks and not in effect" in note
     assert "mywake 20260101 120000 at 0.175" in note
 
 
@@ -185,6 +185,7 @@ def test_env_fallback_note_ignores_an_unset_variable():
     assert owm.env_fallback_note({}, FLEET) is None
     note = owm.env_fallback_note({"OWW_THRESHOLD": "0.5"}, FLEET)
     assert note.startswith("OWW_THRESHOLD=0.5 ") and "OWW_MODEL=" not in note
+    assert "is a fallback and not in effect" in note
 
 
 def test_env_fallback_note_survives_values_it_cannot_compare():

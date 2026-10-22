@@ -108,8 +108,9 @@ def env_fallback_note(env, fleet: dict) -> str | None:
         pass
     if not differs:
         return None
+    verb = "are fallbacks" if len(differs) > 1 else "is a fallback"
     return (f"{' and '.join(differs)} (the add-on's oww_model / oww_threshold) "
-            f"are fallbacks and not in effect: the fleet wake word set in the "
+            f"{verb} and not in effect: the fleet wake word set in the "
             f"dashboard under Config, Wake word is "
             f"{display_name(fleet_model) if fleet_model else 'unset'} at "
             f"{fleet_threshold}, and an "
