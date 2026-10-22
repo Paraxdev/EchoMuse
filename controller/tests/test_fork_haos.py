@@ -438,6 +438,39 @@ def test_a_rollback_that_cannot_stop_the_fork_starts_nothing_and_says_what_to_do
     assert not (sim.work / "lock").exists()
 
 
+def test_a_rebuild_of_the_running_fork_needs_force(deployed):
+    """Supervisor rebuilds by removing the image first, so rebuilding the
+    fork in use takes voice down for the whole build."""
+    sim = deployed
+    pve(sim, "migrate")
+    before = len(history(sim))
+
+    p = deploy(sim, check=False)
+
+    assert p.returncode != 0
+    assert "deploy --force" in p.stderr and "Nothing was changed" in p.stderr
+    assert history(sim)[before:] == [], "nothing reached Supervisor"
+    assert not (sim.work / "app.prev").exists(), "the app folder was not replaced"
+    assert sim.app(ff.FORK)["state"] == "started"
+
+    p = deploy(sim, "--force")
+
+    assert ["rebuild", ff.FORK] in history(sim)[before:]
+    assert "voice is down until the build finishes" in p.stderr
+
+
+def test_a_failed_rebuild_of_the_running_fork_says_how_to_go_back(deployed):
+    sim = deployed
+    pve(sim, "migrate")
+    sim.update(lambda st: st.update(fail=["rebuild"]))
+
+    p = deploy(sim, "--force", check=False)
+
+    assert p.returncode != 0
+    assert "now has no image" in p.stderr
+    assert "'sh tools/fork/pve.sh rollback' starts the upstream app" in p.stderr
+
+
 def test_migrate_starts_the_fork_once_when_supervisor_made_no_data_folder(deployed):
     sim = deployed
     shutil.rmtree(sim.data / ff.FORK)

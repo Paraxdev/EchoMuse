@@ -3,16 +3,20 @@
 # Home Assistant OS VM as a local app, and drives the migration to it.
 #
 # Usage:
-#   pve.sh deploy [--full] [--dry-run]       build from this checkout, push it into the VM
-#   pve.sh deploy --git URL [--ref REF] [--full]
+#   pve.sh deploy [--full] [--dry-run] [--force]
+#                                            build from this checkout, push it into the VM
+#   pve.sh deploy --git URL [--ref REF] [--full] [--force]
 #                                            clone and build inside the VM instead
 #   pve.sh migrate [--recopy | --keep-fork-data] [--no-start] [--from SLUG]
 #   pve.sh rollback [--no-start] [--from SLUG]
 #   pve.sh status [--logs N]
 #
 # deploy installs or updates the app and leaves it stopped (Supervisor starts
-# an updated app again only if it was running). migrate, rollback and status
-# run the haos_*.sh scripts that deploy left in the VM.
+# an updated app again only if it was running). Deploying the version already
+# installed is a rebuild, which takes a running fork down for the length of
+# the build, so it is refused while the fork runs unless --force is given.
+# migrate, rollback and status run the haos_*.sh scripts that deploy left in
+# the VM.
 #
 # Everything in the VM runs through `qm guest exec`, which prints JSON once
 # the command ends; the exit code is read from that, never assumed. Files go
@@ -155,12 +159,14 @@ rm -rf /w/src'
 
 cmd_deploy() {
     full=""
+    force=""
     git_url=""
     git_ref=""
     dry=0
     while [ $# -gt 0 ]; do
         case $1 in
             --full) full=--full ;;
+            --force) force=--force ;;
             --dry-run) dry=1 ;;
             --git)
                 [ $# -ge 2 ] || die "--git needs a repository URL"
@@ -231,7 +237,7 @@ cmd_deploy() {
 
     say "Installing in VM $VMID (Supervisor builds the image; the output arrives when it is done)"
     say "$INTERRUPT_NOTE"
-    qga 3600 - sh "$GUEST_WORK/incoming/pkg/tools/haos_install.sh" "$GUEST_WORK/incoming/pkg"
+    qga 3600 - sh "$GUEST_WORK/incoming/pkg/tools/haos_install.sh" "$GUEST_WORK/incoming/pkg" ${force:+"$force"}
 }
 
 # migrate, rollback, status: the copies deploy installed in the VM.
