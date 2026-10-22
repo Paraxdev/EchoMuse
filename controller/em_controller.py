@@ -430,6 +430,8 @@ DATA_RECONNECT_GRACE_S = 3.0
 # reconnects on one Echo came back at 5.0-13.2s, just too late, and each one
 # took HA's ESPHome voice and Bluetooth proxy ports down and back up.
 CONTROL_RECONNECT_GRACE_S = 20.0
+# device_id -> the Device whose drop came last. Only its grace task releases.
+_last_drop: dict[str, "Device"] = {}
 
 
 class Device:
@@ -5628,12 +5630,20 @@ async def _release_device_services(device) -> None:
     connection closed — unless a replacement connection registered in the
     meantime (#315). Mirrors the data plane's DATA_RECONNECT_GRACE_S.
 
+    Only the newest drop's task releases: when an Echo came back and dropped
+    again inside the grace, the first task released partway through the second
+    drop's grace, taking HA's ports and a ringing timer with it.
+
     esphome.device_connected() is idempotent (a still-listening port is
     kept and only the callbacks are refreshed), so holding services
     through a blip costs nothing on reconnect.
     """
+    _last_drop[device.device_id] = device
     try:
         await asyncio.sleep(CONTROL_RECONNECT_GRACE_S)
+        if _last_drop.get(device.device_id) is not device:
+            return  # a later drop's task owns the release
+        del _last_drop[device.device_id]
         current = em_state.devices.get(device.device_id)
         if current is not None and current is not device:
             return  # replacement is live; it owns the services now
