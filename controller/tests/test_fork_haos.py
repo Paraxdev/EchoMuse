@@ -155,6 +155,7 @@ def test_migrate_copies_the_whole_data_folder_and_switches_the_apps(deployed):
     assert (fork["state"], fork["boot"]) == ("started", "auto")
     assert fork["options"] == ff.UPSTREAM_OPTIONS
     assert fork["ingress_panel"] is True
+    assert fork["watchdog"] is True, "a fork without the upstream's watchdog stays down after a crash"
 
     assert upstream_tree(sim) == before, "the upstream data must only be read"
     assert fork_tree(sim) == before
@@ -242,6 +243,18 @@ def test_after_a_rollback_migrate_asks_whose_data_wins(deployed):
     assert (backups(sim)[-1] / ff.FORK / "written-by-the-fork").read_text() == "fork"
 
 
+def test_keep_fork_data_refuses_when_nothing_was_migrated(deployed):
+    """Keeping the fork's data means keeping what a migration copied; with
+    no migration it would start the fork on an empty database, with a CA no
+    Echo holds."""
+    sim = deployed
+    p = pve(sim, "migrate", "--keep-fork-data", check=False)
+    assert p.returncode != 0
+    assert "no migration record" in p.stderr
+    assert sim.app(ff.UPSTREAM)["state"] == "started"
+    assert backups(sim) == []
+
+
 def _dead_pid():
     p = subprocess.Popen(["sh", "-c", "exit 0"])
     p.wait()
@@ -270,6 +283,39 @@ def test_a_second_run_waits_for_the_first_to_end(deployed):
     assert "no longer running" in p.stderr
     assert sim.app(ff.FORK)["state"] == "started"
     assert not lock.exists()
+
+
+def test_deploy_from_git_clones_and_builds_inside_the_vm(sim):
+    url, ref = "https://github.com/Paraxdev/EchoMuse", "fork/forkops"
+    env = sim.env(EMF_CHUNK="200000", **sim.install_git(REPO))
+
+    deploy(sim, "--git", url, "--ref", ref, env=env)
+
+    [clone] = [json.loads(line) for line in (sim.root / "git.log").read_text().splitlines()]
+    assert clone[-2:] == [url, str(sim.work / "incoming" / "src")]
+    assert clone[clone.index("--branch") + 1] == ref
+    assert any(h[0] == "run" and h[1].startswith("alpine/git:") and "@sha256:" in h[1]
+               for h in history(sim))
+    marker = (sim.local / "echomuse_fork" / ".echomuse_fork_app").read_text()
+    assert ("mode=full" if _mode() else "mode=overlay") in marker
+    fork = sim.app(ff.FORK)
+    assert fork["installed"] and fork["state"] == "stopped" and fork["boot"] == "manual"
+    assert (sim.work / "tools" / "haos_migrate.sh").is_file()
+    assert not (sim.work / "incoming" / "src").exists(), "the clone is removed after the build"
+    calls = [json.loads(line) for line in sim.qm_log.read_text().splitlines()]
+    assert not any("--pass-stdin" in c for c in calls), "nothing is sent from this host"
+
+
+def test_deploy_unpacks_in_a_container_when_the_vm_has_no_base64(sim, tmp_path):
+    guest = ff.path_without(tmp_path, "base64")
+    env = sim.env(EMF_CHUNK="200000",
+                  EMF_FAKE_GUEST_PATH=f"{sim.bin}{os.pathsep}{guest}",
+                  EMF_FAKE_CONTAINER_PATH=os.environ["PATH"])
+
+    deploy(sim, env=env)
+
+    assert any(h[0] == "run" and "hassio-cli" in h[1] for h in history(sim))
+    assert sim.app(ff.FORK)["installed"]
 
 
 def test_rollback_changes_neither_data_folder(deployed):
@@ -325,6 +371,18 @@ def _busybox(tmp_path):
             raise RuntimeError("busybox is required under CI for the Home Assistant OS scripts")
         pytest.skip("needs busybox on the host")
     return bb
+
+
+def test_deploy_under_busybox(sim, tmp_path):
+    """The VM side of a deploy (unpack, install) on busybox alone. With no
+    base64 applet, as on Ubuntu's busybox, the unpack runs in the container."""
+    bb = _busybox(tmp_path)
+    env = sim.env(EMF_CHUNK="200000",
+                  EMF_FAKE_GUEST_PATH=f"{sim.bin}{os.pathsep}{bb}",
+                  EMF_FAKE_CONTAINER_PATH=os.environ["PATH"])
+    deploy(sim, env=env)
+    assert sim.app(ff.FORK)["installed"]
+    assert (sim.local / "echomuse_fork" / ".echomuse_fork_app").is_file()
 
 
 def test_migrate_and_rollback_under_busybox(deployed, tmp_path):

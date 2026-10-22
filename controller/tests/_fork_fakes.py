@@ -3,12 +3,16 @@ Stand-ins for the parts of Proxmox and Home Assistant OS that tools/fork/
 drives, so its scripts run for real against a scratch tree.
 
 `docker` emulates what the haos_*.sh scripts ask of the HAOS host: the
-hassio_cli container (the ha CLI, curl to the Supervisor API, jq), `docker ps`
-and `docker inspect`. Supervisor is a JSON state file: apps with state, boot,
-version and options, and the containers that have a data folder mounted. A
-local app is "built" by reading the version from its folder's config.yaml,
-as Supervisor would. `qm` runs `qm guest exec` locally and answers in the
-JSON that Proxmox prints.
+hassio_cli container (the ha CLI, curl to the Supervisor API, jq), `docker ps`,
+`docker inspect` and `docker run`. Supervisor is a JSON state file: apps with
+state, boot, watchdog, version and options, and the containers that have a
+data folder mounted. A local app is "built" by reading the version from its
+folder's config.yaml, as Supervisor would. A `docker run` container is its
+command run on this host with each mount's target rewritten to its source, on
+the PATH in EMF_FAKE_CONTAINER_PATH. `qm` runs `qm guest exec` locally, on
+the PATH in EMF_FAKE_GUEST_PATH when that is set, and answers in the JSON
+that Proxmox prints. `git` (installed only by the tests that want it) clones
+by copying this checkout and hands every other command to the real git.
 
 jq is the real one when it is installed (CI has it) and otherwise a table of
 the filters the scripts use, which fails on any it does not know.
@@ -162,16 +166,19 @@ def api(method, path, body):
             "version_latest": app.get("version_latest"),
             "options": app.get("options", {}),
             "ingress_panel": app.get("ingress_panel", False),
+            "watchdog": app.get("watchdog", False),
         }}
     if what == "options" and method == "POST":
         if not app.get("installed"):
             return 400, {"result": "error", "message": "App is not installed"}
         data = json.loads(body)
+        if set(data) - {"boot", "options", "ingress_panel", "watchdog"}:
+            return 400, {"result": "error", "message": "extra keys not allowed"}
         if "boot" in data and data["boot"] not in ("auto", "manual"):
             return 400, {"result": "error", "message": "bad boot"}
         if "options" in data and s.get("schema") and set(data["options"]) - set(s["schema"]):
             return 400, {"result": "error", "message": "unknown option"}
-        for k in ("boot", "options", "ingress_panel"):
+        for k in ("boot", "options", "ingress_panel", "watchdog"):
             if k in data:
                 app[k] = data[k]
         s["history"].append(["options", slug, data])
@@ -187,10 +194,10 @@ JQ = {
     '.data.options | tojson': lambda d: [json.dumps(d["data"]["options"])],
     '.data.options | to_entries | sort_by(.key) | tojson':
         lambda d: [json.dumps([{"key": k, "value": v} for k, v in sorted(d["data"]["options"].items())])],
-    '{options: .data.options} + (if (.data.ingress_panel | type) == "boolean" then {ingress_panel: .data.ingress_panel} else {} end) | tojson':
+    '{options: .data.options} + (.data | with_entries(select((.key == "ingress_panel" or .key == "watchdog") and (.value | type) == "boolean"))) | tojson':
         lambda d: [json.dumps({"options": d["data"]["options"],
-                               **({"ingress_panel": d["data"]["ingress_panel"]}
-                                  if isinstance(d["data"].get("ingress_panel"), bool) else {})})],
+                               **{k: d["data"][k] for k in ("ingress_panel", "watchdog")
+                                  if isinstance(d["data"].get(k), bool)}})],
     '"state \\(.data.state), boot \\(.data.boot), version \\(.data.version)"':
         lambda d: ["state %s, boot %s, version %s" % tuple(
             "null" if d["data"].get(k) is None else d["data"][k] for k in ("state", "boot", "version"))],
@@ -221,8 +228,38 @@ def jq(flt, text):
     return 0
 
 
+def run(args):
+    mounts, entry, i = [], None, 0
+    while i < len(args) and args[i].startswith("-"):
+        if args[i] == "--rm":
+            i += 1
+        elif args[i] in ("-v", "--network", "--entrypoint"):
+            if args[i] == "-v":
+                src, dst = args[i + 1].split(":", 1)
+                mounts.append((src, dst))
+            elif args[i] == "--entrypoint":
+                entry = args[i + 1]
+            i += 2
+        else:
+            print(f"fake docker: run option {args[i]} not emulated", file=sys.stderr)
+            return 1
+    image, rest = args[i], args[i + 1:]
+    s["history"].append(["run", image])
+    save()
+
+    def host(x):
+        for src, dst in mounts:
+            if src != dst:
+                x = x.replace(dst + "/", src + "/")
+        return x
+    env = dict(os.environ, PATH=os.environ.get("EMF_FAKE_CONTAINER_PATH", os.environ["PATH"]))
+    return subprocess.run([entry] + [host(x) for x in rest], env=env).returncode
+
+
 def main(argv):
     cmd = argv[0]
+    if cmd == "run":
+        return run(argv[1:])
     if cmd == "ps":
         for cid in s["containers"]:
             print(cid)
@@ -312,13 +349,39 @@ if data and once and not Path(once).exists():
     Path(once).write_text("done")
     i = data.index(b"A")
     data = data[:i] + b"B" + data[i + 1:]
-p = subprocess.run(cmd, input=data, capture_output=True)
+env = dict(os.environ)
+if os.environ.get("EMF_FAKE_GUEST_PATH"):
+    env["PATH"] = os.environ["EMF_FAKE_GUEST_PATH"]
+p = subprocess.run(cmd, input=data, capture_output=True, env=env)
 r = {"exitcode": p.returncode, "exited": 1}
 if p.stdout:
     r["out-data"] = p.stdout.decode("utf-8", "replace")
 if p.stderr:
     r["err-data"] = p.stderr.decode("utf-8", "replace")
 print(json.dumps(r, indent=3, sort_keys=True))
+'''
+
+FAKE_GIT = r'''#!@PYTHON@
+import json, os, shutil, sys
+from pathlib import Path
+
+a = sys.argv[1:]
+if a[:1] == ["clone"]:
+    i = a.index("--")
+    url, dest = a[i + 1], Path(a[i + 2])
+    log = os.environ.get("EMF_FAKE_GIT_LOG")
+    if log:
+        with open(log, "a") as f:
+            f.write(json.dumps(a) + "\n")
+    repo = Path(os.environ["EMF_FAKE_REPO"])
+    for part in ("tools/fork", "controller", "controller-ea"):
+        shutil.copytree(repo / part, dest / part,
+                        ignore=shutil.ignore_patterns("tests", "__pycache__", "data", ".venv"))
+    sys.exit(0)
+real = os.environ.get("EMF_REAL_GIT")
+if not real:
+    sys.exit(1)
+os.execv(real, [real] + a)
 '''
 
 UPSTREAM = "acc06409_controller-ea"
@@ -379,7 +442,7 @@ class Sim:
             "apps": {UPSTREAM: {
                 "installed": True, "state": "started", "boot": "auto",
                 "version": "2.27.0-ea.1", "version_latest": "2.27.0-ea.1",
-                "options": UPSTREAM_OPTIONS, "ingress_panel": True,
+                "options": UPSTREAM_OPTIONS, "ingress_panel": True, "watchdog": True,
             }},
             "containers": {"c-" + UPSTREAM: {"name": "/app_" + UPSTREAM, "mounts": [str(up)]}},
             "history": [],
@@ -411,6 +474,14 @@ class Sim:
     def app(self, slug: str) -> dict:
         return self.load()["apps"].get(slug, {})
 
+    def install_git(self, repo: Path) -> dict:
+        """Put the stand-in git on this simulation's PATH; returns the env it
+        reads. A clone copies `repo`, so nothing is fetched."""
+        real = shutil.which("git") or ""
+        _write_exe(self.bin / "git", FAKE_GIT)
+        return {"EMF_FAKE_REPO": str(repo), "EMF_REAL_GIT": real,
+                "EMF_FAKE_GIT_LOG": str(self.root / "git.log")}
+
     def env(self, path_dirs=None, **extra) -> dict:
         env = dict(os.environ)
         base = path_dirs if path_dirs is not None else env.get("PATH", "")
@@ -436,6 +507,24 @@ def deploy_mode(repo: Path) -> list:
                           capture_output=True, text=True, check=True).stdout.strip()
     pinned = re.search(r'^BASE_FINGERPRINT="([0-9a-f]{64})"$', build.read_text(), re.M).group(1)
     return [] if have == pinned else ["--full"]
+
+
+def path_without(root: Path, *names: str) -> Path:
+    """A directory linking every command on PATH except `names`, to stand in
+    for a host that lacks them."""
+    d = root / "path-without"
+    d.mkdir()
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        if not directory or not os.path.isdir(directory):
+            continue
+        for entry in sorted(os.listdir(directory)):
+            target = os.path.join(directory, entry)
+            link = d / entry
+            if entry in names or os.path.lexists(link):
+                continue
+            if os.path.isfile(target) and os.access(target, os.X_OK):
+                link.symlink_to(target)
+    return d
 
 
 def tree(path: Path) -> dict:

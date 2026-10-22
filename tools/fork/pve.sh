@@ -134,7 +134,9 @@ mkdir pkg
 gzip -dc pkg.tgz | tar -xf - -C pkg
 echo "Unpacked in the VM, sha256 verified."'
 
-# deploy --git: clone and build in the VM. URL and ref arrive as arguments.
+# deploy --git: clone and build in the VM. URL, ref and build mode arrive as
+# arguments. The mode is a word, never an empty argument, so the positions
+# cannot shift if one were dropped on the way through qm.
 # shellcheck disable=SC2016
 GUEST_CLONE='set -eu
 rm -rf "$1/incoming"
@@ -143,7 +145,11 @@ docker run --rm -v "$1/incoming:/w" --entrypoint sh "$5" -c "$6" sh "$2" "$3" "$
 # shellcheck disable=SC2016
 CLONE='set -eu
 git clone --quiet --depth 1 --branch "$2" -- "$1" /w/src
-sh /w/src/tools/fork/build_app.sh ${3:+"$3"} --out /w/pkg/echomuse_fork
+case $3 in
+    full) sh /w/src/tools/fork/build_app.sh --full --out /w/pkg/echomuse_fork ;;
+    overlay) sh /w/src/tools/fork/build_app.sh --out /w/pkg/echomuse_fork ;;
+    *) echo "unknown build mode: $3" >&2; exit 1 ;;
+esac
 cp /w/src/tools/fork/haos_*.sh /w/pkg/tools/
 rm -rf /w/src'
 
@@ -184,9 +190,11 @@ cmd_deploy() {
             -* | *[!A-Za-z0-9._/-]*) die "unexpected characters in the ref: $git_ref" ;;
         esac
         [ "$dry" = 0 ] || die "--dry-run builds this checkout; it does not apply to --git"
+        mode=overlay
+        [ -z "$full" ] || mode=full
         check_vm
-        say "Cloning $git_url ($git_ref) and building it inside VM $VMID"
-        qga 1200 - sh -c "$GUEST_CLONE" sh "$GUEST_WORK" "$git_url" "$git_ref" "$full" "$ALPINE_GIT" "$CLONE"
+        say "Cloning $git_url ($git_ref) and building it ($mode) inside VM $VMID"
+        qga 1200 - sh -c "$GUEST_CLONE" sh "$GUEST_WORK" "$git_url" "$git_ref" "$mode" "$ALPINE_GIT" "$CLONE"
     else
         for t in tar gzip base64 split sha256sum mktemp; do
             command -v "$t" >/dev/null 2>&1 || die "$t is missing on this host"

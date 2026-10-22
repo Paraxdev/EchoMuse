@@ -136,8 +136,8 @@ run refuses to start until the first has ended):
    `tls/` (the CA and server certificate the Echo verifies; without them it
    cannot connect at all), `oww_models/` (the custom wake word), `firmware/`
    and any recordings. Every file is then compared by checksum;
-6. copies the upstream app's options and its sidebar setting to the fork app,
-   turns the fork's start at boot on, and starts it.
+6. copies the upstream app's options and its sidebar and watchdog settings to
+   the fork app, turns the fork's start at boot on, and starts it.
 
 Because the database and certificates are copied, the Echo keeps its pairing
 and its ESPHome ports (stored per device in the database), so Home Assistant's
@@ -146,7 +146,8 @@ existing ESPHome entries come back on their own.
 Run it again and it does not copy again: that would throw away what the fork
 has written since. `--recopy` does copy again, after the same backup. If the
 upstream app has run since the last copy (after a rollback), it stops and asks
-for `--recopy` (take the upstream data) or `--keep-fork-data`.
+for `--recopy` (take the upstream data) or `--keep-fork-data` (keep what the
+fork has; refused when nothing was ever migrated).
 
 **3. Verify.** The migration ends with this checklist:
 

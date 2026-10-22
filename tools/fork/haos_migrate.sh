@@ -14,8 +14,8 @@
 #   5. cp -a the whole upstream data folder into the fork's (echomuse.db with
 #      its -wal and -shm, tls/ with the CA every Echo verifies, oww_models/,
 #      firmware/, recordings) and compare every file
-#   6. copy the upstream options and sidebar setting, turn on the fork's
-#      start at boot, start it
+#   6. copy the upstream options, sidebar and watchdog settings, turn on the
+#      fork's start at boot, start it
 #
 # Once a copy is done it is not repeated, because that would discard what
 # the fork has written since. --recopy repeats it, after the same backup.
@@ -84,6 +84,8 @@ if [ -f "$dst/$MIGRATED" ] && [ "$recopy" = 0 ]; then
         die "$UPSTREAM_SLUG has written to its database since then ($newer). Run again with --recopy to take its current data (the fork's is backed up first), or with --keep-fork-data to start the fork on its own."
     fi
     say "Not copying again; --recopy would (after a backup)."
+elif [ "$keep" = 1 ]; then
+    die "--keep-fork-data keeps what an earlier migration copied, and $dst has no migration record. Run without it to copy the upstream data."
 fi
 
 step "1/6 Stop $UPSTREAM_SLUG and turn off its start at boot"
@@ -141,9 +143,11 @@ if [ "$copy" = 1 ]; then
     step "6/6 Carry the options over, turn on the fork's start at boot, start it"
     # Same schema on both apps, so the upstream options are valid as they
     # are. Supervisor stores them per app; options.json in the copied folder
-    # is rewritten from the store at the next start.
+    # is rewritten from the store at the next start. The sidebar entry and
+    # the watchdog are per-app settings too, and a fork left without the
+    # watchdog the upstream app had would stay down after a crash.
     up_info=$(sv_call GET "/$UPSTREAM_SLUG/info") || die "cannot read $UPSTREAM_SLUG's options"
-    body=$(printf '%s\n' "$up_info" | jqr '{options: .data.options} + (if (.data.ingress_panel | type) == "boolean" then {ingress_panel: .data.ingress_panel} else {} end) | tojson')
+    body=$(printf '%s\n' "$up_info" | jqr '{options: .data.options} + (.data | with_entries(select((.key == "ingress_panel" or .key == "watchdog") and (.value | type) == "boolean"))) | tojson')
     if sv_call POST "/$FORK_SLUG/options" "$body" >/dev/null; then
         a=$(printf '%s\n' "$up_info" | jqr '.data.options | to_entries | sort_by(.key) | tojson')
         b=$(app_field "$FORK_SLUG" 'options | to_entries | sort_by(.key) | tojson') || b=""
