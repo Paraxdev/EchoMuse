@@ -2,12 +2,15 @@ package wifi
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -146,9 +149,9 @@ func TestSecurityOfAgreesWithEmWifiOnItsVectors(t *testing.T) {
 func TestDescribeFreqsGroupsByBand(t *testing.T) {
 	cases := map[string][]int{
 		"2.4 GHz (2412, 2437 MHz) + 5 GHz (5180, 5500 MHz)": {2412, 2437, 5180, 5500},
-		"5 GHz (5785 MHz)":                                   {5785},
-		"2.4 GHz (2484 MHz) + 5955 MHz":                      {2484, 5955},
-		"frequency not reported":                             nil,
+		"5 GHz (5785 MHz)":              {5785},
+		"2.4 GHz (2484 MHz) + 5955 MHz": {2484, 5955},
+		"frequency not reported":        nil,
 	}
 	for want, in := range cases {
 		if got := describeFreqs(in); got != want {
@@ -237,9 +240,11 @@ func TestProcStatFindsTheStateAfterTheLastParen(t *testing.T) {
 }
 
 // The old supplicant answers PONG until SIGTERM has taken effect, and a
-// reassociate sent to it is lost with it. The nudge waits for it to go.
+// reassociate sent to it is lost with it. The nudge waits for it to go, and
+// marks the network log only once it has: its stdio flushes on the way out.
 func TestNudgeWaitsForTheOldSupplicantToExit(t *testing.T) {
 	onBase(t, platform.EmOS, "", "ctrl_interface="+emosDir+"\n")
+	logPath := useNetLog(t, "boot\n")
 	dir := useProc(t)
 	writeStat(t, dir, "4242", "4242 (wpa_supplicant) S 1 1 1\n")
 	cli := useFakeCli(t, func(cmd string) (string, error) {
@@ -253,18 +258,27 @@ func TestNudgeWaitsForTheOldSupplicantToExit(t *testing.T) {
 	t.Cleanup(func() { supplicantWait = oldWait })
 	supplicantWait = 5 * time.Second
 
-	res := make(chan bool, 1)
-	go func() { res <- nudgeNewSupplicant([]int{4242}) }()
+	type nudged struct {
+		mark logMark
+		ok   bool
+	}
+	res := make(chan nudged, 1)
+	go func() {
+		m, ok := nudgeNewSupplicant([]int{4242})
+		res <- nudged{m, ok}
+	}()
 	time.Sleep(50 * time.Millisecond)
 	for _, c := range cli.seen() {
 		if c == "reassociate" || c == "ping" {
 			t.Fatalf("asked the supplicant (%s) while the retired one was still running", c)
 		}
 	}
+	appendFile(t, logPath, "wlan0: CTRL-EVENT-SSID-TEMP-DISABLED id=0 ssid=\"Old\" auth_failures=1 duration=10 reason=CONN_FAILED\n")
 	writeStat(t, dir, "4242", "4242 (wpa_supplicant) Z 1 1 1\n")
+	var got nudged
 	select {
-	case ok := <-res:
-		if !ok {
+	case got = <-res:
+		if !got.ok {
 			t.Fatal("nudge reported failure")
 		}
 	case <-time.After(3 * time.Second):
@@ -273,6 +287,31 @@ func TestNudgeWaitsForTheOldSupplicantToExit(t *testing.T) {
 	calls := cli.seen()
 	if len(calls) != 2 || calls[0] != "ping" || calls[1] != "reassociate" {
 		t.Fatalf("calls %v, want [ping reassociate]", calls)
+	}
+	if s := netLogSince(got.mark); s != "" || !got.mark.ok {
+		t.Fatalf("the mark (%+v) lets the retired supplicant's last words through: %q", got.mark, s)
+	}
+}
+
+// A supplicant that will not exit leaves nothing to mark from, and is not
+// asked anything.
+func TestNudgeLeavesNoMarkWhenTheOldSupplicantStays(t *testing.T) {
+	onBase(t, platform.EmOS, "", "ctrl_interface="+emosDir+"\n")
+	useNetLog(t, "boot\n")
+	dir := useProc(t)
+	writeStat(t, dir, "4242", "4242 (wpa_supplicant) S 1 1 1\n")
+	cli := useFakeCli(t, func(cmd string) (string, error) { return "PONG\n", nil })
+	sleep = func(time.Duration) { time.Sleep(time.Millisecond) }
+	oldWait := supplicantWait
+	t.Cleanup(func() { supplicantWait = oldWait })
+	supplicantWait = 30 * time.Millisecond
+
+	m, ok := nudgeNewSupplicant([]int{4242})
+	if ok || m.ok {
+		t.Fatalf("nudged %v with mark %+v past a supplicant that never exited", ok, m)
+	}
+	if calls := cli.seen(); len(calls) != 0 {
+		t.Fatalf("asked %v of the supplicant that was told to go", calls)
 	}
 }
 
@@ -287,7 +326,7 @@ func TestNudgeGivesUpQuietlyWhenNothingAnswers(t *testing.T) {
 	t.Cleanup(func() { supplicantWait = oldWait })
 	supplicantWait = 30 * time.Millisecond
 
-	if nudgeNewSupplicant(nil) {
+	if _, ok := nudgeNewSupplicant(nil); ok {
 		t.Fatal("reported a nudge nobody received")
 	}
 	for _, c := range cli.seen() {
@@ -394,6 +433,12 @@ func TestNetLogIsWhereInitWritesIt(t *testing.T) {
 
 // ─── the whole diagnosis ──────────────────────────────────────────────────────
 
+// diagnose is the failure path's diagnosis in one call: the scan, then the
+// supplicant's reason since m.
+func diagnose(ssid []byte, psk string, m logMark) string {
+	return explainNoAssociation(ssid, psk, scanAir(), supplicantReason(netLogSince(m)))
+}
+
 func scanReply(results string) func(string) (string, error) {
 	return func(cmd string) (string, error) {
 		switch cmd {
@@ -416,7 +461,7 @@ func TestDiagnosisOfANetworkNotOnTheAir(t *testing.T) {
 		"aa\t2437\t-50\t[WPA2-PSK-CCMP][ESS]\tHome\n"+
 			"bb\t2412\t-70\t[WPA2-PSK-CCMP][ESS]\tNeighbour\n"))
 
-	got := diagnoseNoAssociation([]byte("Home-5G"), "12345678", m)
+	got := diagnose([]byte("Home-5G"), "12345678", m)
 	for _, want := range []string{
 		`"Home-5G" was not seen in a scan just now (2 other networks were, none of them on 5 GHz)`,
 		"on a channel this radio does not scan",
@@ -443,7 +488,7 @@ func TestDiagnosisOfAWrongPassphraseOn5GHz(t *testing.T) {
 		"aa\t2437\t-55\t[WPA2-PSK-CCMP][ESS]\tHome\n"+
 			"ab\t5180\t-61\t[WPA2-PSK+SAE-CCMP][ESS]\tHome\n"))
 
-	got := diagnoseNoAssociation([]byte("Home"), "12345678", m)
+	got := diagnose([]byte("Home"), "12345678", m)
 	want := `"Home" is on the air: 2.4 GHz (2437 MHz) + 5 GHz (5180 MHz), -55 dBm, [WPA2-PSK-CCMP][ESS]. ` +
 		`The supplicant reported WRONG_KEY: the AP rejected the passphrase.`
 	if got != want {
@@ -468,13 +513,17 @@ func TestDiagnosisNamesWhatThisEchoCannotJoin(t *testing.T) {
 		{"[ESS]", "12345678", "open network, but a passphrase was given"},
 		{"[WPA2-PSK-CCMP][ESS]", "", "needs a passphrase and none was given"},
 		{"[WPA2-PSK+SAE-CCMP][ESS]", "12345678", "the passphrase, or the AP refusing this client, is the likely cause"},
-		{"[ESS]", "", "the passphrase, or the AP refusing this client, is the likely cause"},
+		// No passphrase was involved, so it cannot be the cause.
+		{"[ESS]", "", "so the AP refusing this client is the likely cause"},
 	}
 	for _, c := range cases {
 		useFakeCli(t, scanReply("aa\t2462\t-60\t"+c.flags+"\tNet\n"))
-		got := diagnoseNoAssociation([]byte("Net"), c.psk, markNetLog())
+		got := diagnose([]byte("Net"), c.psk, markNetLog())
 		if !strings.Contains(got, c.want) {
 			t.Errorf("%s with psk %q: %s", c.flags, c.psk, got)
+		}
+		if c.psk == "" && strings.Contains(got, "passphrase,") {
+			t.Errorf("%s with no passphrase blames one: %s", c.flags, got)
 		}
 		if strings.Contains(got, "supplicant reported") {
 			t.Errorf("no log, yet a supplicant reason: %s", got)
@@ -486,8 +535,122 @@ func TestDiagnosisWhenTheScanFails(t *testing.T) {
 	onBase(t, platform.FireOS, "ctrl_interface="+androidDir+"\n", "")
 	useNetLog(t, "")
 	useFakeCli(t, func(cmd string) (string, error) { return "", os.ErrPermission })
-	got := diagnoseNoAssociation([]byte("Net"), "12345678", markNetLog())
+	got := diagnose([]byte("Net"), "12345678", markNetLog())
 	if !strings.HasPrefix(got, "Could not scan to find out why") {
 		t.Errorf("got %q", got)
+	}
+}
+
+// ─── a whole failed change, on emOS ───────────────────────────────────────────
+
+// A supplicant's stdout is the network log, a file, so stdio holds its lines
+// until it exits. A failed change therefore meets two flushes: the supplicant
+// it replaced, writing about the old network as it goes, and the one that
+// tried the new network, which writes only when the revert retires it. The
+// report must carry the second and never the first.
+func TestAFailedChangeReportsTheSupplicantThatTriedIt(t *testing.T) {
+	const oldConf = "ctrl_interface=" + emosDir + "\nnetwork={\n\tssid=\"Old\"\n\tpsk=\"oldpassword\"\n}\n"
+	onBase(t, platform.EmOS, "", oldConf)
+	resetLastScan(t)
+	logPath := useNetLog(t, "boot\n")
+	proc := useProc(t)
+	tmp := t.TempDir()
+	oldSupp, oldChown, oldMarker, oldAssoc, oldSignal := emosSuppP, chownFile, markerPath, associateTimeout, signalProc
+	t.Cleanup(func() {
+		emosSuppP, chownFile, markerPath, associateTimeout, signalProc = oldSupp, oldChown, oldMarker, oldAssoc, oldSignal
+		mu.Lock()
+		pending = nil
+		mu.Unlock()
+	})
+	emosSuppP = filepath.Join(tmp, "no-supplicant-here")
+	chownFile = func(string, int, int) error { return nil }
+	markerPath = filepath.Join(tmp, "pending")
+	associateTimeout = 10 * time.Millisecond
+
+	var evMu sync.Mutex
+	var events []string
+	event := func(e string) {
+		evMu.Lock()
+		events = append(events, e)
+		evMu.Unlock()
+	}
+	// What each supplicant holds unwritten when it is told to go. 100 ran the
+	// old network and lost it for a moment once; 101 tried the new one.
+	lastWords := map[int]string{
+		100: "wlan0: CTRL-EVENT-SSID-TEMP-DISABLED id=0 ssid=\"Old\" auth_failures=1 duration=10 reason=CONN_FAILED\n",
+		101: "wlan0: Trying to associate with 11:22:33:44:55:66 (SSID='Home' freq=2437 MHz)\n" +
+			"wlan0: CTRL-EVENT-SSID-TEMP-DISABLED id=0 ssid=\"Home\" auth_failures=1 duration=10 reason=WRONG_KEY\n",
+	}
+	start := func(pid int) {
+		d := filepath.Join(proc, strconv.Itoa(pid))
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "comm"), []byte("wpa_supplicant\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		writeStat(t, proc, strconv.Itoa(pid), fmt.Sprintf("%d (wpa_supplicant) S 1 1 1\n", pid))
+	}
+	start(100)
+	var confTried string
+	signalProc = func(pid int, sig syscall.Signal) error {
+		if sig != syscall.SIGTERM {
+			t.Errorf("signal %v to %d, want SIGTERM", sig, pid)
+		}
+		event(fmt.Sprintf("SIGTERM %d", pid))
+		if pid == 100 {
+			b, _ := os.ReadFile(emosConfP)
+			confTried = string(b)
+		}
+		// It exits, flushing; init reaps it and starts the next.
+		appendFile(t, logPath, lastWords[pid])
+		if err := os.RemoveAll(filepath.Join(proc, strconv.Itoa(pid))); err != nil {
+			t.Fatal(err)
+		}
+		start(pid + 1)
+		return nil
+	}
+	useFakeCli(t, func(cmd string) (string, error) {
+		event(cmd)
+		switch cmd {
+		case "ping":
+			return "PONG\n", nil
+		case "status":
+			return "wpa_state=COMPLETED\nssid=Old\n", nil
+		case "scan_results":
+			return "bssid / frequency / signal level / flags / ssid\n" +
+				"aa:01\t2437\t-55\t[WPA2-PSK-CCMP][ESS]\tHome\n", nil
+		}
+		return "OK\n", nil
+	})
+
+	Change([]byte("Home"), "notthepassword", func() bool { return false })
+
+	r := PendingResult()
+	if r == nil || r.OK {
+		t.Fatalf("result %+v, want a failure", r)
+	}
+	want := `did not associate to "Home" within 10ms. ` +
+		`"Home" is on the air: 2.4 GHz (2437 MHz), -55 dBm, [WPA2-PSK-CCMP][ESS]. ` +
+		`The supplicant reported WRONG_KEY: the AP rejected the passphrase.`
+	if r.Error != want {
+		t.Errorf("reported\n  %s\nwant\n  %s", r.Error, want)
+	}
+
+	evMu.Lock()
+	seq := strings.Join(events, ",")
+	evMu.Unlock()
+	scanned, retired := strings.Index(seq, "scan_results"), strings.Index(seq, "SIGTERM 101")
+	if scanned < 0 || retired < 0 || scanned > retired {
+		t.Errorf("the air must be scanned while the supplicant that failed still runs: %s", seq)
+	}
+	if !strings.Contains(confTried, "\tssid=\"Home\"\n\tscan_ssid=1\n") {
+		t.Errorf("a network no scan had seen was not probed for by name:\n%s", confTried)
+	}
+	if b, _ := os.ReadFile(emosConfP); string(b) != oldConf {
+		t.Errorf("the old conf was not put back:\n%s", b)
+	}
+	if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
+		t.Errorf("the pending marker outlived a clean revert: %v", err)
 	}
 }

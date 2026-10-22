@@ -81,7 +81,6 @@ import (
 const (
 	androidConf = "/data/misc/wifi/wpa_supplicant.conf"
 	emosConf    = "/data/emos/wpa.conf"
-	markerPath  = "/data/local/tmp/echomuse_wifi_pending"
 
 	// Fallback, and the default on FireOS. Mirrors WPA_CTRL_DEFAULT in
 	// emos/init/init.c; the real value comes from sockDir.
@@ -99,16 +98,22 @@ const (
 	// the conf we write.
 	emosSupp = "/sbin/wpa_supplicant"
 
-	// 20s (the provisioning wizard's window) proved too tight on hardware
-	// for a network the framework hasn't joined before — autojoin's scan
-	// cycle alone can eat most of it. Reverts re-associate to a known
-	// network well inside 20s, so only first-join pays the longer wait.
-	associateTimeout = 45 * time.Second
-	ipTimeout        = 20 * time.Second
+	ipTimeout = 20 * time.Second
 	// The reconnect gate covers mDNS rediscovery plus the control client's
 	// 5s retry cadence; generous because a false negative reverts a
 	// perfectly good network change.
 	reconnectTimeout = 90 * time.Second
+)
+
+// Vars so a whole change runs off-target.
+var (
+	markerPath = "/data/local/tmp/echomuse_wifi_pending"
+
+	// 20s (the provisioning wizard's window) proved too tight on hardware
+	// for a network the framework hasn't joined before: autojoin's scan
+	// cycle alone can eat most of it. Reverts re-associate to a known
+	// network well inside 20s, so only first-join pays the longer wait.
+	associateTimeout = 45 * time.Second
 )
 
 // Result is the outcome of a change attempt, reported to the controller
@@ -161,15 +166,17 @@ var (
 	// is not root and cannot hand a file to AID_WIFI, and the uid it asks for
 	// is the whole assertion.
 	chownFile = os.Chown
-	// The supplicant, the process table, the clock and emOS's network log,
-	// indirected so a change's diagnosis and its nudge run off-target.
+	// The supplicant, the process table and its signals, the clock and emOS's
+	// network log, indirected so a change's diagnosis and its nudge run
+	// off-target.
 	wpaCliExec = func(args []string) (string, error) {
 		out, err := exec.Command("wpa_cli", args...).CombinedOutput()
 		return string(out), err
 	}
-	procDir = "/proc"
-	sleep   = time.Sleep
-	netLogP = netLog
+	procDir    = "/proc"
+	signalProc = syscall.Kill
+	sleep      = time.Sleep
+	netLogP    = netLog
 )
 
 // netLog is where emOS's init sends the supplicant's stdout (NETLOG in
@@ -618,7 +625,7 @@ func retireSupplicant() ([]int, error) {
 		if err != nil || strings.TrimSpace(string(comm)) != "wpa_supplicant" {
 			continue
 		}
-		if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
+		if err := signalProc(pid, syscall.SIGTERM); err != nil {
 			log.Printf("[wifi] SIGTERM to supplicant pid %d: %v", pid, err)
 			continue
 		}
@@ -651,20 +658,32 @@ var pollEvery = 250 * time.Millisecond
 // A PONG counts only once every retired pid has exited: the old supplicant
 // answers until SIGTERM has taken effect, and a reassociate it swallows on its
 // way out is no nudge. Giving up changes nothing; init's own nudge follows.
-func nudgeNewSupplicant(retired []int) bool {
+//
+// The mark is where the network log stood once they had all gone, and is unset
+// if they had not. The supplicant's stdout is that file, which stdio buffers
+// until exit, so a retired supplicant writes its last lines, about a network
+// that is no longer being tried, as it goes; a mark taken any earlier would
+// count them as the new supplicant's.
+func nudgeNewSupplicant(retired []int) (logMark, bool) {
 	deadline := time.Now().Add(supplicantWait)
+	for !allExited(retired) {
+		if !time.Now().Before(deadline) {
+			log.Printf("[wifi] the old supplicant did not exit within %s, leaving association to init's nudge", supplicantWait)
+			return logMark{}, false
+		}
+		sleep(pollEvery)
+	}
+	mark := markNetLog()
 	for {
-		if allExited(retired) {
-			if out, err := wpaCli("ping"); err == nil && hasLine(out, "PONG") {
-				out, err := wpaCli("reassociate")
-				log.Printf("[wifi] nudged the new supplicant: reassociate -> %s (err %v)",
-					strings.TrimSpace(out), err)
-				return err == nil
-			}
+		if out, err := wpaCli("ping"); err == nil && hasLine(out, "PONG") {
+			out, err := wpaCli("reassociate")
+			log.Printf("[wifi] nudged the new supplicant: reassociate -> %s (err %v)",
+				strings.TrimSpace(out), err)
+			return mark, err == nil
 		}
 		if !time.Now().Before(deadline) {
 			log.Printf("[wifi] new supplicant did not answer within %s, leaving association to init's nudge", supplicantWait)
-			return false
+			return mark, false
 		}
 		sleep(pollEvery)
 	}
@@ -720,27 +739,31 @@ func procStat(pid int) (comm string, state byte, ok bool) {
 // else writes the file, so there is no save to lose a write to. Write, then
 // retire the supplicant for init's supervisor to replace, as em-wifi does, and
 // nudge the replacement.
-func reloadConf(content string) error {
+//
+// The mark is where emOS's network log stood once the supplicant that was
+// replaced had exited (see nudgeNewSupplicant): what follows it is the new
+// supplicant's account. FireOS has no such log, and its mark is unset.
+func reloadConf(content string) (logMark, error) {
 	if onEmOS() {
 		if err := writeConf(content); err != nil {
-			return err
+			return logMark{}, err
 		}
 		retired, err := retireSupplicant()
 		if err != nil {
-			return err
+			return logMark{}, err
 		}
-		nudgeNewSupplicant(retired)
-		return nil
+		mark, _ := nudgeNewSupplicant(retired)
+		return mark, nil
 	}
 	if err := disableWifi(); err != nil {
-		return err
+		return logMark{}, err
 	}
 	if err := writeConf(content); err != nil {
 		// Leave WiFi usable rather than down next to a bad conf.
 		_ = enableWifi()
-		return err
+		return logMark{}, err
 	}
-	return enableWifi()
+	return logMark{}, enableWifi()
 }
 
 func waitFor(what string, timeout time.Duration, cond func() bool) bool {
@@ -878,39 +901,47 @@ func Change(ssidBytes []byte, psk string, connected func() bool) {
 		return
 	}
 
-	revert := func(reason string) {
+	// explain, when given, replaces reason once the old conf is back in: on
+	// emOS that is after the supplicant that failed has exited, which is when
+	// its account of the attempt reaches the network log.
+	revertWith := func(reason string, explain func() string) {
 		log.Printf("[wifi] change to %q failed (%s) — reverting", ssid, reason)
 		// Restore with WiFi down (see reloadConf) — but if the restore
 		// write fails, conf is beyond self-healing: leave the marker so
 		// RecoverIfPending retries on next start.
-		restoreErr := reloadConf(string(old))
+		_, restoreErr := reloadConf(string(old))
 		if restoreErr != nil {
 			log.Printf("[wifi] REVERT FAILED: %v — marker left for recovery on restart", restoreErr)
 		} else {
 			_ = os.Remove(markerPath)
 			_ = os.Remove(backupPath())
 		}
+		if explain != nil {
+			reason = explain()
+			log.Printf("[wifi] change to %q: %s", ssid, reason)
+		}
 		waitFor("re-association after revert", associateTimeout, associated)
 		setResult(Result{OK: false, SSID: ssid, Error: reason})
 	}
+	revert := func(reason string) { revertWith(reason, nil) }
 
 	probe := !seenInLastScan(ssidBytes)
 	if probe {
 		log.Printf("[wifi] %q was not in this device's last scan, probing for it by name", ssid)
 	}
-	// Before the reload, so the supplicant's account of this attempt is
-	// everything written after it.
-	mark := markNetLog()
-	if err := reloadConf(composeConf(ssidBytes, psk, probe)); err != nil {
+	mark, err := reloadConf(composeConf(ssidBytes, psk, probe))
+	if err != nil {
 		revert(err.Error())
 		return
 	}
 
 	if !waitForAssociation(ssidBytes, associateTimeout) {
-		// Diagnosed before the revert, while the supplicant that failed is
-		// still the one running and its log lines are the newest.
-		revert(fmt.Sprintf("did not associate to %q within %s. %s",
-			ssid, associateTimeout, diagnoseNoAssociation(ssidBytes, psk, mark)))
+		// The air is scanned while the supplicant that failed still runs.
+		air := scanAir()
+		failed := fmt.Sprintf("did not associate to %q within %s", ssid, associateTimeout)
+		revertWith(failed, func() string {
+			return failed + ". " + explainNoAssociation(ssidBytes, psk, air, supplicantReason(netLogSince(mark)))
+		})
 		return
 	}
 	log.Printf("[wifi] associated to %q", ssid)
@@ -962,7 +993,7 @@ func RecoverIfPending() {
 		_ = os.Remove(markerPath)
 		return
 	}
-	if err := reloadConf(string(backup)); err != nil {
+	if _, err := reloadConf(string(backup)); err != nil {
 		log.Printf("[wifi] startup restore failed: %v — leaving marker for next start", err)
 		return
 	}

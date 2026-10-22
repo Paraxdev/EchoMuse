@@ -114,19 +114,28 @@ func on5GHz(n Network) bool {
 	return false
 }
 
-// diagnoseNoAssociation says why a change did not associate, from a fresh
-// scan and the supplicant's own log since mark. Always returns a sentence.
-func diagnoseNoAssociation(ssid []byte, psk string, mark logMark) string {
-	var out []string
+// airScan is the scan half of a diagnosis, taken just after the attempt.
+type airScan struct {
+	nets []Network
+	err  error
+}
+
+func scanAir() airScan {
 	// The supplicant may already be scanning and refuse a new one (FAIL-BUSY);
 	// its results are still the freshest there are.
 	_, _ = wpaCli("scan")
 	nets, err := collectScan()
-	reason := supplicantReason(netLogSince(mark))
-	if err != nil {
-		out = append(out, fmt.Sprintf("Could not scan to find out why (%v).", err))
+	return airScan{nets: nets, err: err}
+}
+
+// explainNoAssociation says why a change did not associate, from the scan and
+// the supplicant's own reason ("" when it gave none). Always a sentence.
+func explainNoAssociation(ssid []byte, psk string, air airScan, reason string) string {
+	var out []string
+	if air.err != nil {
+		out = append(out, fmt.Sprintf("Could not scan to find out why (%v).", air.err))
 	} else {
-		out = append(out, describeAir(ssid, psk, nets, reason != "")...)
+		out = append(out, describeAir(ssid, psk, air.nets, reason != "")...)
 	}
 	if reason != "" {
 		out = append(out, "The supplicant reported "+reason+".")
@@ -186,7 +195,14 @@ func describeAir(ssid []byte, psk string, nets []Network, hasReason bool) []stri
 			return append(out, "It needs a passphrase and none was given.")
 		}
 	}
-	if !hasReason {
+	switch {
+	case hasReason:
+	case psk == "":
+		// Only an open network gets here without a passphrase, so the
+		// passphrase cannot be what went wrong.
+		out = append(out, "This Echo can join that kind of network, so the AP "+
+			"refusing this client is the likely cause.")
+	default:
 		out = append(out, "This Echo can join that kind of network, so the passphrase, "+
 			"or the AP refusing this client, is the likely cause.")
 	}
