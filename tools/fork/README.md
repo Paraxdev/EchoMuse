@@ -82,13 +82,13 @@ sh tools/fork/build_app.sh --fingerprint controller-ea-v2.28.0-ea.1
 
 ## First time: deploy, migrate, verify
 
-**0. Get the fork onto the Proxmox host.** The branch to deploy is
-`paraxdev/fixes`: the fixes and these tools. Either a clone (the version then
+**0. Get the fork onto the Proxmox host.** The fork's `main` carries
+the fixes and these tools. Either a clone (the version then
 names the commit):
 
 ```sh
 apt install git        # if it is missing
-git clone --branch paraxdev/fixes https://github.com/Paraxdev/EchoMuse /root/EchoMuse
+git clone https://github.com/Paraxdev/EchoMuse /root/EchoMuse
 cd /root/EchoMuse
 ```
 
@@ -96,7 +96,7 @@ Or no clone at all: fetch `pve.sh` alone and let the VM clone and build, with
 `deploy --git` in step 1.
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/Paraxdev/EchoMuse/refs/heads/paraxdev/fixes/tools/fork/pve.sh
+curl -fsSLO https://raw.githubusercontent.com/Paraxdev/EchoMuse/refs/heads/main/tools/fork/pve.sh
 ```
 
 Both need the branch pushed to GitHub. From Windows, run the commands below
@@ -116,7 +116,7 @@ boot off, and the upstream app keeps running.
 sh tools/fork/pve.sh deploy --dry-run   # optional: build and pack only, sends nothing
 sh tools/fork/pve.sh deploy
 # or, without a clone:
-sh pve.sh deploy --git https://github.com/Paraxdev/EchoMuse --ref paraxdev/fixes
+sh pve.sh deploy --git https://github.com/Paraxdev/EchoMuse --ref main
 ```
 
 The output arrives when Supervisor has finished building (a minute or two).
