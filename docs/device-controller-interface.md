@@ -44,9 +44,12 @@ All three exist in plain (`ws://`) and TLS (`wss://`) form; see
 controller asks for it.
 
 **Keepalive and loss.** The controller sends a WebSocket ping every 20s on each
-plane and closes a connection after **30s** with no pong
-(`WS_PING_TIMEOUT_S`); answer pings promptly, which means never blocking the
-goroutine or thread that reads the socket. Home WiFi loses packets, so a device
+plane. It closes `/control` and `/shell` after **30s** with no pong
+(`WS_PING_TIMEOUT_S`), and `/data` only after **60s** in which nothing at all
+arrived from the device, no pong and no frame (`em_keepalive.DATA_SILENCE_S`),
+so a pong lost behind a mic frame does not end the stream. Answer pings
+promptly all the same, which means never blocking the goroutine or thread that
+reads the socket. Home WiFi loses packets, so a device
 should set **`TCP_THIN_LINEAR_TIMEOUTS`** on its sockets (Linux: retransmit on a
 linear timer while under four segments are in flight, instead of doubling);
 the controller sets it on its end. On a board whose radio shares an antenna

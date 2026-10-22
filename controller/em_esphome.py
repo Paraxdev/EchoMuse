@@ -3337,6 +3337,10 @@ async def device_connected(
     server._start_conversation = start_conversation
     server._set_wake_word = set_wake_word
     server.wake_word_enabled = bool(wake_word_enabled)
+    # Back within the reconnect grace: a ring its dropped link cut off, or one
+    # refused while the link was down, rings here or no later timer would.
+    if ring_alarm is not None and server._timers.ringing:
+        await ring_alarm()
     if server._server is not None:
         log.debug(f"[esphome.{device_id[-8:]}] device_connected: port {server.port} already listening")
         return

@@ -162,6 +162,7 @@ COPY em_tcp.py .
 COPY em_pacing.py .
 COPY em_platform.py .
 COPY em_wsclose.py .
+COPY em_keepalive.py .
 COPY em_rttlog.py .
 COPY em_esphome.py .
 COPY em_ble_health.py .

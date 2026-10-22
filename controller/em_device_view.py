@@ -1,8 +1,8 @@
 """
 How a device is presented: the record /api/devices and the live events
 WebSocket send for each Echo, merged from its database row and its live
-connection, plus the two pieces of state that outlive a connection — a WiFi
-change in flight and the last link refusal.
+connection, plus the state that outlives a connection: a WiFi change in
+flight, the last link refusal and why the control link last closed.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ import em_pairing
 import em_releases
 import em_state
 import em_volume
+import em_wsclose
 from version import firmware_update as _firmware_update
 
 log = logging.getLogger("echomuse.api")
@@ -133,6 +134,28 @@ def clear_link_refused(device_id: str) -> None:
     _link_refusals.pop(device_id, None)
 
 
+# device_id -> {"at" (epoch ms), "why", "routine"}: the last control-plane
+# close. In memory only; the "Disconnected: <why>" device log row is the
+# durable copy, and a restart closes every link anyway.
+_last_disconnects: dict[str, dict] = {}
+
+
+def note_disconnect(device_id: str, close_why: tuple) -> str:
+    """Record a control-plane close from em_wsclose's four values, and say why."""
+    why = em_wsclose.describe(*close_why)
+    _last_disconnects[device_id] = {
+        "at": int(time.time() * 1000),
+        "why": why,
+        "routine": em_wsclose.is_routine(close_why[0], close_why[2]),
+    }
+    return why
+
+
+def _last_disconnect(device_id: str) -> dict:
+    last = _last_disconnects.get(device_id)
+    return {"lastDisconnect": dict(last)} if last else {}
+
+
 def _health_json(boot: dict | None) -> dict | None:
     if not boot:
         return None
@@ -147,11 +170,8 @@ def _health_json(boot: dict | None) -> dict | None:
 
 def merge_device(row, boot: dict | None = None) -> dict:
     """
-    Merge a DB device row with live in-memory state.
-
-    DB row provides persistent fields (label, config, firmware_ver etc).
-    Live em_state.devices dict provides transient state (connected, speaking,
-    muted, listening, thinking).
+    Merge a DB device row (persistent fields: label, config, firmware_ver...)
+    with live state from em_state.devices (connected, speaking, muted, ...).
     """
     device_id = row["device_id"]
     live = em_state.devices.get(device_id)
@@ -216,6 +236,8 @@ def merge_device(row, boot: dict | None = None) -> dict:
         "linkTls":          getattr(live, "secure", False) if live else False,
         # Why the controller is turning this device away, while it is.
         "linkRefused":      _link_refusals.get(device_id),
+        # Why its control link last closed; absent when none has since start.
+        **_last_disconnect(device_id),
         # The device's owner held its button and it is waiting for Approve.
         "pairRequest":      em_pairing.pending_request(device_id),
         # Q4 fix (2026-07-05 review): near-miss counter — same lifecycle as

@@ -95,6 +95,7 @@ import em_pacing
 import em_platform
 import em_tcp
 import em_wsclose
+import em_keepalive
 import em_rttlog
 import em_eq
 import em_limiter
@@ -304,8 +305,9 @@ WAKE_RESTART_HEALTHY_S     = 60.0
 
 PING_INTERVAL_SEC = 5.0
 
-# WebSocket keepalive on every device plane. The timeout is how long a ping may
-# go unanswered before the link is declared dead, and 10s was shorter than the
+# WebSocket keepalive on every device plane, though /data closes by its own
+# rule (em_keepalive). Elsewhere the timeout is how long a ping may go
+# unanswered before the link is declared dead, and 10s was shorter than the
 # loss bursts this link actually has: with the BLE scan running, a Dot loses
 # enough frames that TCP's retransmits alone can outlast it, and the overnight
 # `1011 keepalive ping timeout` closes were exactly that (2026-09-23) — a live
@@ -421,9 +423,12 @@ DATA_RECONNECT_GRACE_S = 3.0
 # #315: the control plane gets the same treatment the data plane has had —
 # a device whose control connection drops during a controller restart, an
 # add-on update or a link excursion keeps its ESPHome entities, BLE proxy
-# and media session for this long before they are released. The device's
-# own reconnect (endpoint pinned, per #106) lands well inside the window.
-CONTROL_RECONNECT_GRACE_S = 5.0
+# and media session for this long before they are released. It has to outlast
+# the device's own redial, which waits 5s after any drop and then probes the
+# last-known controller for up to 3s (client/control.go): at 5s, 35 of 118
+# reconnects on one Echo came back at 5.0-13.2s, just too late, and each one
+# took HA's ESPHome voice and Bluetooth proxy ports down and back up.
+CONTROL_RECONNECT_GRACE_S = 20.0
 
 
 class Device:
@@ -2192,6 +2197,9 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
 # (_dismiss_by_speech), or HA cancelling a still-RUNNING timer before it fires.
 
 async def start_timer_alarm(device: Device) -> None:
+    if em_state.devices.get(device.device_id) is not device:
+        log.info(f"[{device.device_id}] Timer alarm due on a dropped link: it rings if the Echo is back within the grace")
+        return
     if device.timer_alarm_task is not None and not device.timer_alarm_task.done():
         return  # already ringing (a second timer finished) — one ring is enough
     log.info(f"[{device.device_id}] Timer alarm — ringing")
@@ -5061,7 +5069,6 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         version      = msg.get("version")
         capabilities = msg.get("capabilities", [])
 
-        loop         = asyncio.get_event_loop()
         approval_mode = await loop.run_in_executor(
             None, db.get_config, "device_approval", DEVICE_APPROVAL
         )
@@ -5302,6 +5309,8 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         await api.notify_device_connected(device_id)
         _device_ref = device
         async def _standalone_play(pcm_bytes: bytes, _d=_device_ref) -> bool:
+            if em_state.devices.get(_d.device_id) is not _d:
+                return False  # its link dropped; HA holds this callback through the reconnect grace
             # Same acoustic-feedback guard as voice turns: announcements
             # play outside a turn, so the always-on OWW stream is live —
             # stop it for the duration and put it back after. An active
@@ -5585,9 +5594,8 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                 )
             else:
                 log.info(f"[control] Device disconnected: {device.device_id}")
-                em_dbwriter.submit(db.log_device,
-                    device.device_id, "info", "controller", "Disconnected"
-                )
+                why = em_device_view.note_disconnect(device.device_id, em_wsclose.from_connection(ws))
+                em_dbwriter.submit(db.log_device, device.device_id, "info", "controller", f"Disconnected: {why}")
                 # Stamp the moment it went away, so "last seen" is exact for
                 # an offline device rather than up to one stats report stale.
                 em_dbwriter.submit(db.touch_device_seen, device.device_id)
@@ -6118,27 +6126,18 @@ async def main():
     mdns_task = asyncio.create_task(_mdns_refresh_loop(azc, info))
 
     log.info(f"WebSocket server starting on {SERVER_HOST}:{SERVER_PORT}")
+    # Shared, so the plain and TLS listeners cannot disagree on liveness.
+    link_opts = dict(ping_interval=WS_PING_INTERVAL_S, ping_timeout=WS_PING_TIMEOUT_S,
+                     max_size=10 * 1024 * 1024,
+                     create_connection=em_keepalive.DeviceConnection)
 
     try:
         async with contextlib.AsyncExitStack() as stack:
             await stack.enter_async_context(websockets.serve(
-                router,
-                SERVER_HOST,
-                SERVER_PORT,
-                ping_interval=WS_PING_INTERVAL_S,
-                ping_timeout=WS_PING_TIMEOUT_S,
-                max_size=10 * 1024 * 1024,
-            ))
+                router, SERVER_HOST, SERVER_PORT, **link_opts))
             if tls_ctx is not None:
                 await stack.enter_async_context(websockets.serve(
-                    router_tls,
-                    SERVER_HOST,
-                    SERVER_TLS_PORT,
-                    ssl=tls_ctx,
-                    ping_interval=WS_PING_INTERVAL_S,
-                    ping_timeout=WS_PING_TIMEOUT_S,
-                    max_size=10 * 1024 * 1024,
-                ))
+                    router_tls, SERVER_HOST, SERVER_TLS_PORT, ssl=tls_ctx, **link_opts))
                 log.info(f"Device-link TLS (wss) listening on {SERVER_HOST}:{SERVER_TLS_PORT}")
             if REQUIRE_DEVICE_TLS:
                 log.info("REQUIRE_DEVICE_TLS=1 — plain/tokenless device connections will be rejected")
