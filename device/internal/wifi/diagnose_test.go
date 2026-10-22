@@ -741,3 +741,56 @@ func TestAFailedChangeReportsTheSupplicantThatTriedIt(t *testing.T) {
 		t.Errorf("the pending marker outlived a clean revert: %v", err)
 	}
 }
+
+// The MT8163 driver reports WoWLAN as enabled, so a supplicant ended while
+// associated skips its deauth and leaves the link and PTK in the firmware; the
+// next one then had its PTK refused on every network for minutes (emOS
+// net.last, 2026-10-23). It must be told to leave on deinit before SIGTERM.
+func TestReloadConfTellsTheSupplicantToLeaveBeforeEndingIt(t *testing.T) {
+	onBase(t, platform.EmOS, "", "ctrl_interface="+emosDir+"\n")
+	useNetLog(t, "boot\n")
+	proc := useProc(t)
+	oldSupp, oldChown, oldSignal := emosSuppP, chownFile, signalProc
+	t.Cleanup(func() { emosSuppP, chownFile, signalProc = oldSupp, oldChown, oldSignal })
+	emosSuppP = filepath.Join(t.TempDir(), "no-supplicant-here")
+	chownFile = func(string, int, int) error { return nil }
+
+	start := func(pid int) {
+		d := filepath.Join(proc, strconv.Itoa(pid))
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "comm"), []byte("wpa_supplicant\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		writeStat(t, proc, strconv.Itoa(pid), fmt.Sprintf("%d (wpa_supplicant) S 1 1 1\n", pid))
+	}
+	start(100)
+
+	var seq []string
+	signalProc = func(pid int, sig syscall.Signal) error {
+		seq = append(seq, fmt.Sprintf("signal %d %v", pid, sig))
+		if err := os.RemoveAll(filepath.Join(proc, strconv.Itoa(pid))); err != nil {
+			t.Fatal(err)
+		}
+		start(pid + 1)
+		return nil
+	}
+	useFakeCli(t, nil)
+	wpaCliExec = func(args []string) (string, error) {
+		seq = append(seq, strings.Join(args[4:], " "))
+		if args[len(args)-1] == "ping" {
+			return "PONG\n", nil
+		}
+		return "OK\n", nil
+	}
+
+	if _, err := reloadConf("network={\n}\n"); err != nil {
+		t.Fatalf("reloadConf: %v", err)
+	}
+	got := strings.Join(seq, ", ")
+	want := "set wowlan_disconnect_on_deinit 1, signal 100 terminated"
+	if !strings.HasPrefix(got, want) {
+		t.Errorf("calls were\n  %s\nwant them to start\n  %s", got, want)
+	}
+}

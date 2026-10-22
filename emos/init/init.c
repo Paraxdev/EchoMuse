@@ -2761,6 +2761,10 @@ static void net_main(void)
                      * default route: the bounce takes the route with it. */
                     if (dhc > 0)
                         kill(dhc, SIGTERM);
+                    /* The driver reports WoWLAN on, so a supplicant ended
+                     * while associated leaves its link and PTK in the
+                     * firmware and the next one's PTK is refused. */
+                    run_bounded(wpa_disconnect, WD_CLI_MAX_S);
                     if (wpa > 0)
                         stop_child(&wpa);
                     ifdown("wlan0");

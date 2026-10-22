@@ -348,6 +348,13 @@ echo "Wrote $CONF."
 
 # init supervises the supplicant and restarts it against whatever conf is
 # there, so all this does is retire the old process and watch for an address.
+#
+# The MT8163 driver reports WoWLAN as enabled, so without this hostap's exit
+# skips the deauth and leaves the old link and its PTK in the firmware, and the
+# next supplicant's PTK is refused for minutes (leaveOnDeinit in
+# device/internal/wifi). At runtime, since FireOS 5's supplicant rejects the
+# field in a conf.
+"$CLI" -p "$CTRL" -iwlan0 set wowlan_disconnect_on_deinit 1 >/dev/null 2>&1
 killall wpa_supplicant 2>/dev/null
 echo "Connecting..."
 i=0

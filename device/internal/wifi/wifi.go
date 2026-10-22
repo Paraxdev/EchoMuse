@@ -599,6 +599,19 @@ func enableWifi() error {
 	return nil
 }
 
+// leaveOnDeinit makes the running supplicant deauthenticate and clear its keys
+// when SIGTERM ends it. The MT8163 driver reports WoWLAN as enabled, so hostap
+// otherwise skips both at deinit and leaves the old link and its PTK in the
+// firmware: the next supplicant then has its PTK refused ("Failed to set PTK
+// to the driver") and its authentications time out for minutes, whichever
+// network it joins (emOS net.last, 2026-10-23). Set at runtime rather than in
+// the conf because FireOS 5's own supplicant predates the field and would
+// refuse the whole conf; on that one this just answers FAIL.
+func leaveOnDeinit() {
+	out, err := wpaCli("set", "wowlan_disconnect_on_deinit", "1")
+	log.Printf("[wifi] wowlan_disconnect_on_deinit -> %s (err %v)", strings.TrimSpace(out), err)
+}
+
 // retireSupplicant ends the running supplicant so emOS's init restarts it
 // against the new conf; that supervision loop is a 5s ticker (net_main in
 // emos/init/init.c).
@@ -748,6 +761,7 @@ func reloadConf(content string) (logMark, error) {
 		if err := writeConf(content); err != nil {
 			return logMark{}, err
 		}
+		leaveOnDeinit()
 		retired, err := retireSupplicant()
 		if err != nil {
 			return logMark{}, err
