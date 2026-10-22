@@ -3848,11 +3848,11 @@ async def _stream_listen(device: Device):
                             ),
                         )
 
-                # Who gets to start a turn. In "on" mode the device decides and
-                # this controller's own crossing is demoted to a measurement —
-                # see em_shadow.decide_wake_source for why it keeps scoring at
-                # all. In every other mode it is the old condition, held for
+                # Who gets to start a turn: the old condition, held for
                 # owwPatience frames in a row at the normal bar (em_wakepatience).
+                # In "on" mode the device decides, and each crossing here is
+                # only a measurement, whatever the patience; see
+                # em_shadow.decide_wake_source for why it keeps scoring at all.
                 if not trusted and score >= eff_threshold:
                     log.info(
                         f"[{device.device_id}] Wake score {score:.3f} >= "
@@ -3861,8 +3861,8 @@ async def _stream_listen(device: Device):
                     )
                 need = em_wakepatience.need(device.oww_patience, eff_threshold, device.oww_threshold)
                 ctrl_hit = run.feed(trusted, score >= eff_threshold, score, need)
-                if run.short and device.oww_on_device != em_shadow.MODE_ON:
-                    log.info(f"[{device.device_id}] OWW: {run.short.describe()}")
+                if device.oww_on_device != em_shadow.MODE_ON and (note := run.report(loop.time())):
+                    log.info(f"[{device.device_id}] OWW: {note}")
                 dev_wake, dev_age = device.pending_wake.take()
                 if dev_wake is None and dev_age is not None:
                     # Expired before anything could act on it. Worth a warning
@@ -3885,7 +3885,7 @@ async def _stream_listen(device: Device):
                         device_score=(dev_wake["score"] if dev_wake is not None else None),
                         trigger_source=(source if source != "none" else None),
                     )
-                if ctrl_hit and device.oww_on_device == em_shadow.MODE_ON:
+                if trusted and score >= eff_threshold and device.oww_on_device == em_shadow.MODE_ON:
                     # "on" mode, and this controller heard it too. Recorded for
                     # the comparison and nothing else — the device is driving.
                     #

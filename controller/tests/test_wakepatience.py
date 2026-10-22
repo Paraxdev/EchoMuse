@@ -57,8 +57,7 @@ def test_patience_1_is_the_old_single_frame_rule():
 
 
 def test_every_frame_from_the_patience_on_counts():
-    # As every frame over the bar did before: "on" mode records each one for
-    # the comparison, and the listener acts on the first.
+    # As every frame over the bar did before; the listener acts on the first.
     assert _fire([0.3, 0.3, 0.3, 0.3, 0.0], 2) == [1, 2, 3]
     assert _fire([0.3, 0.3, 0.3, 0.3, 0.0], 4) == [3]
 
@@ -128,6 +127,41 @@ def test_a_run_cut_by_a_gap_or_a_model_reset_is_not_reported():
 
 def test_describe_counts_in_plural():
     assert P.Short(3, 0.5, 4).describe().startswith("3 frames over the bar")
+
+
+def _short_run(run, peak=0.3):
+    run.feed(True, True, peak, 2)
+    run.feed(True, False, 0.0, 2)
+
+
+def test_the_report_is_the_short_run_rate_limited():
+    run = P.Run()
+    run.feed(True, False, 0.0, 2)
+    assert run.report(0.0) is None, "nothing ended short"
+    _short_run(run)
+    assert run.report(100.0) == (
+        "1 frame over the bar (peak 0.300), patience 2: not a wake")
+    # Speech hovering at the bar: a short run every other frame.
+    for i in range(5):
+        _short_run(run)
+        assert run.report(100.0 + 0.16 * (i + 1)) is None
+    _short_run(run, peak=0.4)
+    assert run.report(100.0 + P.REPORT_EVERY_S) == (
+        "1 frame over the bar (peak 0.400), patience 2: not a wake "
+        "(5 more since the last line)")
+    _short_run(run)
+    assert run.report(200.0).endswith("not a wake"), "the count starts again"
+
+
+def test_a_frame_that_ends_nothing_is_not_held_back():
+    run = P.Run()
+    _short_run(run)
+    assert run.report(0.0)
+    for i in range(10):
+        run.feed(True, False, 0.0, 2)
+        assert run.report(0.1 * i) is None
+    _short_run(run)
+    assert run.report(5.0).endswith("not a wake")
 
 
 # ── The stored value ────────────────────────────────────────────────────────
@@ -223,4 +257,19 @@ def test_frames_dropped_unscored_end_the_run():
 
 def test_the_mode_where_the_echo_decides_does_not_log_short_runs():
     src = _sources.def_source("_stream_listen")
-    assert "if run.short and device.oww_on_device != em_shadow.MODE_ON:" in src
+    assert ("if device.oww_on_device != em_shadow.MODE_ON and "
+            "(note := run.report(loop.time())):") in src
+
+
+def test_the_comparison_in_on_mode_takes_every_crossing():
+    """
+    In "on" mode the Echo decides and this controller's crossings are the
+    score comparison (ctrl_wake_score). Recorded through the run, a wake the
+    Echo fired on one frame would read as one this controller never heard
+    whenever patience is above 1, though it scored the same frame.
+    """
+    src = _sources.code_only(_sources.def_source("_stream_listen"))
+    at = src.index("device.ctrl_shadow.record_cross(")
+    cond = src[src.rfind("if ", 0, at):at]
+    assert "trusted and score >= eff_threshold" in cond, cond
+    assert "ctrl_hit" not in cond, cond

@@ -26,8 +26,12 @@ not a wake, so the effect can be read from the log rather than assumed.
 
 WHERE IT APPLIES
 ----------------
-- The controller's own detection at the normal bar, in every mode it scores
-  in. 1 is the old single-frame behaviour.
+- The controller's own decision at the normal bar, wherever it decides
+  ("off" and "shadow"). 1 is the old single-frame behaviour.
+- Not the crossings it records in "on" mode, where the Echo decides: those
+  are the score comparison (`ctrl_wake_score`), and holding one side of a
+  comparison to a rule the other side does not apply would record a wake the
+  Echo fired on one frame as one this controller never heard.
 - Not the lowered bar used while music plays or an alarm rings with barge-in
   on, and not `_barge_watcher` during a reply: both keep their own rules.
 - An Echo that detects its own wake word applies it only on firmware that
@@ -119,6 +123,11 @@ class Short(NamedTuple):
                 f"patience {self.need}: not a wake")
 
 
+# At most one short-run line per this many seconds, as for near-misses: speech
+# hovering at a low bar can end a run every other frame, six lines a second.
+REPORT_EVERY_S = 2.0
+
+
 class Run:
     """
     Consecutive trusted frames at or over the bar, for one listener.
@@ -126,7 +135,7 @@ class Run:
     `feed()` once per chunk scored, `reset()` at every gap in the audio.
     `frames` is the length of the current run, so the frame that wakes can
     say how many it took. `short` is set by the feed that ended a run short
-    of its patience, and cleared by the next one.
+    of its patience, and cleared by the next one; `report()` is its log line.
     """
 
     def __init__(self) -> None:
@@ -134,6 +143,25 @@ class Run:
         self.peak = 0.0
         self.short: Short | None = None
         self._need = 1
+        self._reported_at = float("-inf")
+        self._held = 0
+
+    def report(self, now: float) -> str | None:
+        """
+        The log line for a run the last feed ended short, or None. Rate
+        limited to one per REPORT_EVERY_S, and a line counts the short runs
+        held back since the one before it, so none goes unaccounted.
+        """
+        if self.short is None:
+            return None
+        if now - self._reported_at < REPORT_EVERY_S:
+            self._held += 1
+            return None
+        line = self.short.describe()
+        if self._held:
+            line += f" ({self._held} more since the last line)"
+        self._reported_at, self._held = now, 0
+        return line
 
     def reset(self) -> None:
         """The next frame does not follow the last one."""
