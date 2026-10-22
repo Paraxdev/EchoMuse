@@ -473,6 +473,29 @@ func TestDiagnosisOfANetworkNotOnTheAir(t *testing.T) {
 	}
 }
 
+// The count of what else was on the air reads as a sentence at every size,
+// and a scan that saw nothing at all says so.
+func TestNotSeenCountsTheOtherNetworks(t *testing.T) {
+	five := Network{SSID: "a", SSIDHex: "61", Freqs: []int{5180}}
+	two := Network{SSID: "b", SSIDHex: "62", Freqs: []int{2412}}
+	cases := []struct {
+		nets []Network
+		want string
+	}{
+		{nil, `"x" was not seen in a scan just now, and neither was any other network.`},
+		{[]Network{two}, "(1 other network was, not on 5 GHz)"},
+		{[]Network{five}, "(1 other network was, on 5 GHz)"},
+		{[]Network{two, two}, "(2 other networks were, none of them on 5 GHz)"},
+		{[]Network{five, two, five}, "(3 other networks were, 2 of them on 5 GHz)"},
+	}
+	for _, c := range cases {
+		got := strings.Join(describeAir([]byte("x"), "12345678", c.nets, false), " ")
+		if !strings.Contains(got, c.want) {
+			t.Errorf("%d networks: %s", len(c.nets), got)
+		}
+	}
+}
+
 func TestDiagnosisOfAWrongPassphraseOn5GHz(t *testing.T) {
 	onBase(t, platform.EmOS, "", "ctrl_interface="+emosDir+"\n")
 	resetLastScan(t)

@@ -158,13 +158,22 @@ func describeAir(ssid []byte, psk string, nets []Network, hasReason bool) []stri
 		}
 	}
 	if match == nil {
-		five := "none of them on 5 GHz"
-		if fives > 0 {
-			five = fmt.Sprintf("%d of them on 5 GHz", fives)
+		var others string
+		switch {
+		case len(nets) == 0:
+			return []string{fmt.Sprintf("%s was not seen in a scan just now, and neither was any other network.", name)}
+		case len(nets) == 1 && fives == 1:
+			others = "1 other network was, on 5 GHz"
+		case len(nets) == 1:
+			others = "1 other network was, not on 5 GHz"
+		case fives == 0:
+			others = fmt.Sprintf("%d other networks were, none of them on 5 GHz", len(nets))
+		default:
+			others = fmt.Sprintf("%d other networks were, %d of them on 5 GHz", len(nets), fives)
 		}
-		return []string{fmt.Sprintf("%s was not seen in a scan just now (%d other networks were, %s): "+
+		return []string{fmt.Sprintf("%s was not seen in a scan just now (%s): "+
 			"out of range, hidden under a different spelling, or on a channel this radio does not scan.",
-			name, len(nets), five)}
+			name, others)}
 	}
 
 	flags := match.Flags
