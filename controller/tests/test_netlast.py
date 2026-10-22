@@ -55,6 +55,22 @@ def test_no_network_identifier_survives():
         assert leak not in msg, leak
 
 
+def test_the_status_the_watchdog_logs_is_redacted_too():
+    """
+    init runs `wpa_cli status` into the log before each watchdog step, and
+    that names the network as `ssid=<name>`, unquoted, where the quote rule
+    cannot reach it.
+    """
+    assert '"-iwlan0", "status"' in INIT_C
+    status = ("bssid=a2:b4:c6:01:02:03\nfreq=2437\nssid=Bob's Attic\nid=0\n"
+              "mode=station\nkey_mgmt=WPA2-PSK\nwpa_state=COMPLETED\n"
+              "ip_address=192.168.1.136\naddress=00:11:22:33:44:55\n")
+    msg = nl.summarise(COPY.splitlines()[0] + "\n" + status)
+    assert "wpa_state=COMPLETED" in msg and "freq=2437" in msg
+    for leak in ("Bob", "Attic", "192.168.1", "a2:b4:c6", "00:11:22"):
+        assert leak not in msg, leak
+
+
 def test_the_gateway_is_never_read():
     assert "gateway" not in nl.parse_summary(COPY.splitlines()[0])
 
