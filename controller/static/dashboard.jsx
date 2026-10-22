@@ -1737,6 +1737,24 @@ function _thresholdText(t) {
   return t == null ? '—' : String(Number(Number(t).toFixed(3)));
 }
 
+// owwPatience as it applies to this Echo, or null where the config has no
+// such key (a controller from before it). The controller applies it to every
+// wake it decides; an Echo deciding its own applies it only on firmware
+// announcing oww_patience, so a stored value there is not what happens. The
+// Echo decides only in "on" with both oww_shadow and oww_trigger
+// (em_shadow.effective_mode). Offline it cannot be told, and the setting is
+// shown as set, as the Config form treats it.
+function _patienceText(cfg, device) {
+  const n = cfg.owwPatience;
+  if (n == null) return null;
+  const frames = `${n} frame${n === 1 ? '' : 's'}`;
+  const echoDecides = !!device.connected && onDeviceMode(cfg) === 'on'
+    && !!device.owwShadowCapable && !!device.owwTriggerCapable;
+  return echoDecides && !device.owwPatienceCapable
+    ? { text: `${frames}, not applied by this firmware`, applied: false }
+    : { text: frames, applied: true };
+}
+
 function HomeCard({ title, headline, tone, children, links }) {
   return (
     <Panel label={title} style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
@@ -1766,6 +1784,7 @@ function HomeTab({ device, globalConfig, release, ctrlRelease, activity, isAdmin
   const ha   = _voiceSatelliteRow(device);
   const totals = _activityTotals(activity);
   const where  = _wakeWhere(device);
+  const patience = _patienceText(cfg, device);
 
   const row = (k, v, c, title) => (
     <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: 'var(--space-6)', alignItems: 'baseline',
@@ -1867,7 +1886,7 @@ function HomeTab({ device, globalConfig, release, ctrlRelease, activity, isAdmin
         {row('Model', custom ? `${wwModelLabel(cfg.owwModel)} (custom)` : wwModelLabel(cfg.owwModel),
              undefined, cfg.owwModel || undefined)}
         {row('Threshold', _thresholdText(cfg.owwThreshold))}
-        {cfg.owwPatience != null && row('Patience', `${cfg.owwPatience} frame${cfg.owwPatience === 1 ? '' : 's'}`)}
+        {patience && row('Patience', patience.text, patience.applied ? undefined : 'var(--muted)')}
         {row('Scored', where || (device.connected ? 'Not reported yet' : 'Not reported while offline'))}
         {row('Heard nothing · 24 h', heard, heardTone,
              'Turns that opened and heard nothing said. After a wake word that is usually a false wake.')}
@@ -2827,6 +2846,9 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                   remoteVolumeArcCapable: !device.connected || !!device.remoteVolumeArcCapable,
                   responseLevelCapable: !device.connected || !!device.responseLevelCapable,
                   wakeMicCapable: !device.connected || !!device.wakeMicCapable,
+                  // For the owwPatience control; nothing reads it on a
+                  // controller without that key.
+                  patienceCapable: !device.connected || !!device.owwPatienceCapable,
                   sendspinCapable: !device.connected || !!device.sendspinCapable,
                   sendspinPanel: device.connected && device.sendspinCapable
                     ? <SendspinPairing deviceId={device.device_id} status={device.sendspin} isAdmin={isAdmin}/>

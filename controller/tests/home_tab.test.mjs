@@ -1,5 +1,6 @@
 // Tests for what the Home tab and Activity read: _activityTotals(),
-// _outcomeLabel(), _lastDrop(), _wakeWhere(), _thresholdText().
+// _outcomeLabel(), _lastDrop(), _wakeWhere(), _thresholdText(),
+// _patienceText().
 //
 //     node controller/tests/home_tab.test.mjs
 //
@@ -35,6 +36,8 @@ const outcomeLabel   = lift("_outcomeLabel");
 const lastDrop       = lift("_lastDrop");
 const wakeWhere      = lift("_wakeWhere");
 const thresholdText  = lift("_thresholdText");
+const onDeviceMode   = lift("onDeviceMode");   // _patienceText calls it by name
+const patienceText   = lift("_patienceText");
 // The scan helpers call these by name, so they are lifted under it.
 const wifiBand         = lift("wifiBand");
 const classifySecurity = lift("classifySecurity");
@@ -108,6 +111,26 @@ check("a stored threshold reads as stored", thresholdText(0.175) === "0.175");
 check("no trailing zeros", thresholdText(0.5) === "0.5");
 check("float noise is trimmed", thresholdText(0.30000000000000004) === "0.3");
 check("absent is a dash", thresholdText(undefined) === "—");
+
+// _patienceText: the setting where it applies, never a claim about an Echo
+// that decides its own wakes on firmware that ignores it.
+const echo = (extra = {}) => ({ connected: true, owwShadowCapable: true, owwTriggerCapable: true, ...extra });
+check("no key, no row (a controller from before owwPatience)",
+      patienceText({ owwOnDevice: "on" }, echo()) === null);
+check("the controller applies it to the wakes it decides",
+      same(patienceText({ owwPatience: 2, owwOnDevice: "off" }, echo()), { text: "2 frames", applied: true }));
+check("one frame is singular",
+      patienceText({ owwPatience: 1, owwOnDevice: "off" }, echo()).text === "1 frame");
+check("an Echo deciding its own wakes without oww_patience does not apply it",
+      patienceText({ owwPatience: 2, owwOnDevice: "on" }, echo()).applied === false);
+check("an Echo deciding its own wakes with oww_patience applies it",
+      patienceText({ owwPatience: 3, owwOnDevice: "on" }, echo({ owwPatienceCapable: true })).applied === true);
+check("on against firmware that cannot trigger is decided by the controller",
+      patienceText({ owwPatience: 2, owwOnDevice: "on" }, echo({ owwTriggerCapable: false })).applied === true);
+check("shadow is decided by the controller",
+      patienceText({ owwPatience: 2, owwOnDevice: "shadow" }, echo()).applied === true);
+check("offline is shown as set, as the Config form treats it",
+      patienceText({ owwPatience: 2, owwOnDevice: "on" }, { connected: false }).applied === true);
 
 // _scanBands: Connectivity's networks carry freqs from newer firmware only.
 check("2.4 only", scanBands([2412, 2437]) === "2.4 GHz");
