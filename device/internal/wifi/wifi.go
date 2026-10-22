@@ -629,7 +629,7 @@ func retireSupplicant() ([]int, error) {
 		log.Println("[wifi] no running supplicant to retire — init will start one")
 		return nil, nil
 	}
-	log.Printf("[wifi] retired %d supplicant process(es) — init restarts against the new conf", len(retired))
+	log.Printf("[wifi] retired %d supplicant process(es), init restarts against the new conf", len(retired))
 	return retired, nil
 }
 
@@ -663,7 +663,7 @@ func nudgeNewSupplicant(retired []int) bool {
 			}
 		}
 		if !time.Now().Before(deadline) {
-			log.Printf("[wifi] new supplicant did not answer within %s — leaving association to init's nudge", supplicantWait)
+			log.Printf("[wifi] new supplicant did not answer within %s, leaving association to init's nudge", supplicantWait)
 			return false
 		}
 		sleep(pollEvery)
@@ -896,7 +896,7 @@ func Change(ssidBytes []byte, psk string, connected func() bool) {
 
 	probe := !seenInLastScan(ssidBytes)
 	if probe {
-		log.Printf("[wifi] %q was not in this device's last scan — probing for it by name", ssid)
+		log.Printf("[wifi] %q was not in this device's last scan, probing for it by name", ssid)
 	}
 	// Before the reload, so the supplicant's account of this attempt is
 	// everything written after it.

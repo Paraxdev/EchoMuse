@@ -1356,7 +1356,7 @@ func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient,
 	if snap.BargeInEnabled != nil && *snap.BargeInEnabled {
 		bargeNote = fmt.Sprintf("barge-in bar %.2f", snap.BargeInThreshold)
 	}
-	log.Printf("[shadow] on-device wake word scoring (%s, threshold %.2f over %d frame(s), %s) — %s",
+	log.Printf("[shadow] on-device wake word scoring (%s, threshold %.2f over %d frame(s), %s): %s",
 		sc.Info(), threshold, sc.Patience(), bargeNote, actsOnCrossings(mode))
 }
 
