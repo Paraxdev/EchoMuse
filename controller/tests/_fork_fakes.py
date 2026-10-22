@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -425,6 +426,18 @@ class Sim:
         return env
 
 
+def deploy_mode(repo: Path) -> list:
+    """`pve.sh deploy`'s build flags for `repo`: none while its image inputs
+    match the overlay's base, else --full. build_app.sh refuses the overlay
+    once they move, which an upstream merge does routinely, and the tests
+    that deploy are not about that."""
+    build = repo / "tools" / "fork" / "build_app.sh"
+    have = subprocess.run(["sh", str(build), "--fingerprint"],
+                          capture_output=True, text=True, check=True).stdout.strip()
+    pinned = re.search(r'^BASE_FINGERPRINT="([0-9a-f]{64})"$', build.read_text(), re.M).group(1)
+    return [] if have == pinned else ["--full"]
+
+
 def tree(path: Path) -> dict:
     """{relative path: bytes} for every file below path."""
     return {str(p.relative_to(path)).replace(os.sep, "/"): p.read_bytes()
@@ -439,7 +452,6 @@ def busybox_path(root: Path):
         return None
     d = root / "busybox-bin"
     d.mkdir()
-    import subprocess
     applets = subprocess.run([real, "--list"], capture_output=True, text=True).stdout.split()
     for name in applets:
         (d / name).symlink_to(real)

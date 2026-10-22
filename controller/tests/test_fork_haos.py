@@ -9,6 +9,7 @@ Under CI the migration and rollback also run with busybox's applets and
 nothing else on PATH, which is what the Home Assistant OS host has.
 """
 
+import functools
 import json
 import os
 import re
@@ -41,7 +42,7 @@ def sim(tmp_path):
 @pytest.fixture(scope="module")
 def _deployed_once(tmp_path_factory):
     s = ff.Sim(tmp_path_factory.mktemp("deployed") / "sim", _schema_keys())
-    pve(s, "deploy")
+    deploy(s)
     return s
 
 
@@ -64,6 +65,15 @@ def pve(sim, *args, **kw):
     return run(sim, FORK_TOOLS / "pve.sh", *args, **kw)
 
 
+@functools.lru_cache(maxsize=None)
+def _mode():
+    return tuple(ff.deploy_mode(REPO))
+
+
+def deploy(sim, *args, **kw):
+    return pve(sim, "deploy", *_mode(), *args, **kw)
+
+
 def history(sim):
     return sim.load()["history"]
 
@@ -84,7 +94,7 @@ def backups(sim):
 
 
 def test_deploy_installs_the_fork_stopped_and_leaves_upstream_running(sim):
-    pve(sim, "deploy")
+    deploy(sim)
 
     fork = sim.app(ff.FORK)
     assert fork["installed"] and fork["state"] == "stopped"
@@ -104,19 +114,19 @@ def test_deploy_installs_the_fork_stopped_and_leaves_upstream_running(sim):
 
 
 def test_deploy_again_rebuilds_the_same_version_and_updates_a_new_one(sim):
-    pve(sim, "deploy")
-    pve(sim, "deploy")
+    deploy(sim)
+    deploy(sim)
     assert ["rebuild", ff.FORK] in history(sim)
 
     sim.update(lambda st: st["apps"][ff.FORK].update(version="2.26.0-old"))
-    pve(sim, "deploy")
+    deploy(sim)
     assert ["update", ff.FORK] in history(sim)
     assert sim.app(ff.FORK)["version"] == sim.app(ff.FORK)["version_latest"]
 
 
 def test_a_damaged_transfer_installs_nothing(sim, tmp_path):
-    p = pve(sim, "deploy", env=sim.env(EMF_CHUNK="200000",
-                                       EMF_FAKE_QM_CORRUPT=str(tmp_path / "corrupted")), check=False)
+    p = deploy(sim, env=sim.env(EMF_CHUNK="200000",
+                                EMF_FAKE_QM_CORRUPT=str(tmp_path / "corrupted")), check=False)
     assert p.returncode != 0
     assert "damaged" in p.stderr
     assert not sim.app(ff.FORK).get("installed")
@@ -127,7 +137,7 @@ def test_deploy_will_not_replace_a_folder_it_did_not_write(sim):
     mine = sim.local / "echomuse_fork"
     mine.mkdir()
     (mine / "config.yaml").write_text('slug: "echomuse_fork"\nversion: "hand-made"\n')
-    p = pve(sim, "deploy", check=False)
+    p = deploy(sim, check=False)
     assert p.returncode != 0
     assert "not written by these tools" in p.stderr
     assert (mine / "config.yaml").read_text().endswith('"hand-made"\n')
@@ -266,23 +276,28 @@ def test_status_reports_both_apps(deployed):
 
 def test_the_renamed_api_and_the_old_cli_group_both_work(sim):
     sim.update(lambda st: st.update(api_prefixes=["/apps"], ha_groups=["addons"]))
-    pve(sim, "deploy")
+    deploy(sim)
     pve(sim, "migrate")
     assert sim.app(ff.FORK)["state"] == "started"
 
 
 def test_dry_run_sends_nothing(sim):
-    p = pve(sim, "deploy", "--dry-run")
+    p = deploy(sim, "--dry-run")
     assert "nothing was sent" in p.stdout
     assert not sim.qm_log.exists()
 
 
-def test_migrate_and_rollback_under_busybox(deployed, tmp_path):
+def _busybox(tmp_path):
     bb = ff.busybox_path(tmp_path)
     if bb is None:
         if os.environ.get("CI"):
             raise RuntimeError("busybox is required under CI for the Home Assistant OS scripts")
         pytest.skip("needs busybox on the host")
+    return bb
+
+
+def test_migrate_and_rollback_under_busybox(deployed, tmp_path):
+    bb = _busybox(tmp_path)
     sim = deployed
     tools = sim.work / "tools"
     env = sim.env(path_dirs=str(bb))
