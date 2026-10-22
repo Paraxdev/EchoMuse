@@ -32,6 +32,14 @@ import em_tasks
 
 log = logging.getLogger("echomuse.api")
 
+# The asset listing's whole budget, and the longest it waits without a byte.
+# It holds the device's shell lock throughout, so on a stalled link the budget
+# alone kept every other caller off the device for two minutes, and most wait
+# only em_shell.LOCK_WAIT_S. 20s is still well above an md5 of the 12MB runtime.
+LISTING_TIMEOUT_S = 120.0
+LISTING_SILENCE_S = 20.0
+
+
 async def device_state(live) -> dict:
     """
     What is actually installed on a device, and how much room it has.
@@ -52,7 +60,7 @@ async def device_state(live) -> dict:
         f'[ -f "$f" ] && echo "$(busybox md5sum "$f" | busybox cut -d\" \" -f1) '
         f'$(busybox stat -c %Y "$f") $f"; done; '
         f'echo "FREE $(busybox df -m /data | busybox tail -1)"'
-    ), timeout=120.0)
+    ), timeout=LISTING_TIMEOUT_S, silence_s=LISTING_SILENCE_S)
 
     free_mb = None
     saw_free = False

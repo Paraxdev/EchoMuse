@@ -52,6 +52,12 @@ queue = asyncio.Lock()
 # and the reconnect watch after it are outside it and bound themselves.
 MAX_HOLD_S = 300.0
 
+# How long the slot detect waits for the device's shell lock. The asset
+# listing the Updates tab sends on opening holds it for up to its 120s budget,
+# plus 15s to open the session and the close, and a lock wait that ran out
+# read as "Could not determine active slot".
+DETECT_LOCK_WAIT_S = 150.0
+
 # Devices waiting on `queue`. Reported separately from
 # `update_in_progress` so the dashboard says "queued" rather than claiming
 # work that has not started — the same rule as everywhere else here: a control
@@ -253,7 +259,7 @@ async def _run_update_locked(device_id: str, release: dict,
             "  echo \"SLOT:server_a MIGRATED\" || echo \"MIGRATE_FAILED\"; "
             "fi"
         )
-        detect_result = await em_shell.run(live, detect_cmd, timeout=60.0)
+        detect_result = await em_shell.run(live, detect_cmd, timeout=60.0, lock_wait=DETECT_LOCK_WAIT_S)
         log.info(f"[api] Slot detect result for {device_id}: {detect_result!r}")
 
         if "MIGRATE_FAILED" in detect_result:
@@ -498,7 +504,8 @@ async def run_rollback(device_id: str, target_version: str) -> None:
             "CURRENT=$(readlink /data/local/bin/server 2>/dev/null); "
             "if [ \"$CURRENT\" = \"server_a\" ] || [ \"$CURRENT\" = \"server_b\" ]; then "
             "  echo \"SLOT:$CURRENT\"; "
-            "else echo \"SLOT_UNKNOWN\"; fi"
+            "else echo \"SLOT_UNKNOWN\"; fi",
+            lock_wait=DETECT_LOCK_WAIT_S,
         )
         for line in detect_result.splitlines():
             if "SLOT:" in line:
