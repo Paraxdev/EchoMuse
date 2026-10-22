@@ -6,8 +6,15 @@ drives, so its scripts run for real against a scratch tree.
 hassio_cli container (the ha CLI, curl to the Supervisor API, jq), `docker ps`,
 `docker inspect` and `docker run`. Supervisor is a JSON state file: apps with
 state, boot, watchdog, version and options, and the containers that have a
-data folder mounted. A local app is "built" by reading the version from its
-folder's config.yaml, as Supervisor would. A `docker run` container is its
+data folder mounted. A stopped app reads `stop_state`, by default 'error' as
+on a real Supervisor, where the controller ignores SIGTERM, dies of SIGKILL
+and so counts as failed. Its container goes at once, unless the app is in
+`sticky` (it stays) or `linger` (it stays for that many `docker ps`
+listings). A local app is "built" by reading the version from its
+folder's config.yaml, as Supervisor would. An action in `fail` is refused
+before anything changes; a rebuild in `build_fails` fails after removing the
+app's container and image, as Supervisor's does, which leaves a running app
+in 'error'. A `docker run` container is its
 command run on this host with each mount's target rewritten to its source, on
 the PATH in EMF_FAKE_CONTAINER_PATH. `qm` runs `qm guest exec` locally, on
 the PATH in EMF_FAKE_GUEST_PATH when that is set, and answers in the JSON
@@ -70,8 +77,13 @@ def start(slug):
 
 
 def stop(slug):
-    apps[slug]["state"] = "stopped"
-    if slug not in s.get("sticky", []):
+    apps[slug]["state"] = s.get("stop_state", "error")
+    if slug in s.get("sticky", []):
+        return
+    linger = s.get("linger", {}).get(slug)
+    if linger:
+        s["containers"][container_id(slug)]["linger"] = linger
+    else:
         s["containers"].pop(container_id(slug), None)
 
 
@@ -129,6 +141,13 @@ def ha(args):
     elif action == "rebuild":
         if app["version"] != app.get("version_latest"):
             print("Error: Version changed, use Update instead Rebuild", file=sys.stderr)
+            return 1
+        if action in s.get("build_fails", []):
+            s["containers"].pop(container_id(slug), None)
+            if app.get("state") in ("started", "startup"):
+                app["state"] = "error"
+            save()
+            print("Error: build failed (injected)", file=sys.stderr)
             return 1
     elif action == "start":
         start(slug)
@@ -262,8 +281,14 @@ def main(argv):
     if cmd == "run":
         return run(argv[1:])
     if cmd == "ps":
-        for cid in s["containers"]:
+        for cid, c in list(s["containers"].items()):
+            if "linger" in c:
+                if c["linger"] <= 0:
+                    del s["containers"][cid]
+                    continue
+                c["linger"] -= 1
             print(cid)
+        save()
         return 0
     if cmd == "inspect":
         fmt = argv[argv.index("--format") + 1]
@@ -491,6 +516,7 @@ class Sim:
             "EMF_MNT": str(self.mnt),
             "EMF_GUEST_WORK": str(self.work),
             "EMF_POLL": "0",
+            "EMF_STOP_WAIT": "5",
             "EMF_FAKE_STATE": str(self.state_path),
             "EMF_FAKE_QM_LOG": str(self.qm_log),
         })

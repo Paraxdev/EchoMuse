@@ -93,6 +93,10 @@ def backups(sim):
     return sorted(d.iterdir()) if d.is_dir() else []
 
 
+def has_container(sim, slug):
+    return "c-" + slug in sim.load()["containers"]
+
+
 def test_deploy_installs_the_fork_stopped_and_leaves_upstream_running(sim):
     deploy(sim)
 
@@ -145,13 +149,15 @@ def test_deploy_will_not_replace_a_folder_it_did_not_write(sim):
 
 
 def test_migrate_copies_the_whole_data_folder_and_switches_the_apps(deployed):
+    """The fake stops an app the way Supervisor does: it then reads 'error'."""
     sim = deployed
     before = upstream_tree(sim)
 
     p = pve(sim, "migrate")
 
     up, fork = sim.app(ff.UPSTREAM), sim.app(ff.FORK)
-    assert (up["state"], up["boot"]) == ("stopped", "manual")
+    assert (up["state"], up["boot"]) == ("error", "manual")
+    assert not has_container(sim, ff.UPSTREAM)
     assert (fork["state"], fork["boot"]) == ("started", "auto")
     assert fork["options"] == ff.UPSTREAM_OPTIONS
     assert fork["ingress_panel"] is True
@@ -195,7 +201,7 @@ def test_migrate_refuses_while_anything_has_the_upstream_data_mounted(deployed):
     p = pve(sim, "migrate", check=False)
 
     assert p.returncode != 0
-    assert "still mounted" in p.stderr
+    assert "still mounted by: app_" + ff.UPSTREAM in p.stderr
     assert "rollback" in p.stderr, "a failure says how to get back"
     assert not (sim.data / ff.FORK / ".echomuse_fork_migrated").exists()
     assert backups(sim) == []
@@ -229,7 +235,7 @@ def test_after_a_rollback_migrate_asks_whose_data_wins(deployed):
 
     up, fork = sim.app(ff.UPSTREAM), sim.app(ff.FORK)
     assert (up["state"], up["boot"]) == ("started", "auto")
-    assert (fork["state"], fork["boot"]) == ("stopped", "manual")
+    assert (fork["state"], fork["boot"]) == ("error", "manual")
 
     def upstream_writes():
         marker = (sim.data / ff.FORK / ".echomuse_fork_migrated").stat().st_mtime
@@ -367,6 +373,123 @@ def test_rollback_changes_neither_data_folder(deployed):
     assert ff.tree(sim.data / ff.FORK) == fork
 
 
+@pytest.mark.parametrize("stop_state", ["error", "stopped"])
+def test_rollback_from_a_running_fork_starts_the_upstream_app(deployed, stop_state):
+    """Supervisor reports a stopped EchoMuse app as 'error', because its
+    controller dies of SIGKILL; an app that exits cleanly reads 'stopped'.
+    Either way it has stopped."""
+    sim = deployed
+    sim.update(lambda st: st.update(stop_state=stop_state))
+    pve(sim, "migrate")
+    assert sim.app(ff.FORK)["state"] == "started"
+
+    p = pve(sim, "rollback")
+
+    up, fork = sim.app(ff.UPSTREAM), sim.app(ff.FORK)
+    assert (up["state"], up["boot"]) == ("started", "auto")
+    assert (fork["state"], fork["boot"]) == (stop_state, "manual")
+    assert not has_container(sim, ff.FORK)
+    hist = history(sim)
+    assert hist.index(["stop", ff.FORK]) < hist.index(["start", ff.UPSTREAM])
+    assert "owwPatience" in p.stdout, "the checklist says what fork firmware keeps"
+    assert not (sim.work / "lock").exists()
+
+
+def test_stopping_waits_for_the_container_to_go(deployed):
+    """Nothing is copied while a container still has the data mounted, and a
+    container that goes a little after the stop is waited for."""
+    sim = deployed
+    sim.update(lambda st: st.update(linger={ff.UPSTREAM: 2}))
+
+    p = pve(sim, "migrate")
+
+    assert f"{ff.UPSTREAM} has stopped (Supervisor reports 'error')" in p.stdout
+    assert fork_tree(sim) == upstream_tree(sim)
+    assert sim.app(ff.FORK)["state"] == "started"
+
+
+def test_a_stop_supervisor_never_reports_goes_on_once_nothing_has_the_data(deployed):
+    """What makes the copy safe is that no container has the data mounted;
+    the reported state only decides how long to wait for that."""
+    sim = deployed
+    sim.update(lambda st: st.update(stop_state="started"))
+
+    p = pve(sim, "migrate")
+
+    assert f"still reports {ff.UPSTREAM} as 'started'" in p.stderr
+    assert fork_tree(sim) == upstream_tree(sim)
+    assert sim.app(ff.FORK)["state"] == "started"
+
+
+def test_a_rollback_that_cannot_stop_the_fork_starts_nothing_and_says_what_to_do(deployed):
+    sim = deployed
+    pve(sim, "migrate")
+    sim.update(lambda st: st.setdefault("sticky", []).append(ff.FORK))
+
+    p = pve(sim, "rollback", check=False)
+
+    assert p.returncode != 0
+    assert "still mounted by: app_" + ff.FORK in p.stderr
+    up = sim.app(ff.UPSTREAM)
+    assert (up["state"], up["boot"]) == ("error", "manual"), "nothing starts beside the fork"
+    assert "never both" in p.stderr
+    # pve.sh prints this on the Proxmox host, so that is where it must run.
+    by_hand = "qm guest exec <vmid> -- docker exec hassio_cli ha apps start"
+    assert f"{by_hand} {ff.UPSTREAM}" in p.stderr
+    assert f"{by_hand} {ff.FORK}" in p.stderr
+    assert not (sim.work / "lock").exists()
+
+
+def test_a_rebuild_of_the_running_fork_needs_force(deployed):
+    """Supervisor rebuilds by removing the image first, so rebuilding the
+    fork in use takes voice down for the whole build."""
+    sim = deployed
+    pve(sim, "migrate")
+    before = len(history(sim))
+
+    p = deploy(sim, check=False)
+
+    assert p.returncode != 0
+    assert "deploy --force" in p.stderr and "Nothing was changed" in p.stderr
+    assert history(sim)[before:] == [], "nothing reached Supervisor"
+    assert not (sim.work / "app.prev").exists(), "the app folder was not replaced"
+    assert sim.app(ff.FORK)["state"] == "started"
+
+    p = deploy(sim, "--force")
+
+    assert ["rebuild", ff.FORK] in history(sim)[before:]
+    assert "voice is down until the build finishes" in p.stderr
+
+
+def test_a_failed_rebuild_of_the_running_fork_says_how_to_go_back(deployed):
+    sim = deployed
+    pve(sim, "migrate")
+    sim.update(lambda st: st.update(build_fails=["rebuild"]))
+
+    p = deploy(sim, "--force", check=False)
+
+    assert p.returncode != 0
+    assert sim.app(ff.FORK)["state"] == "error"
+    assert "now has no image" in p.stderr
+    assert "'sh tools/fork/pve.sh rollback' starts the upstream app" in p.stderr
+
+
+def test_a_rebuild_supervisor_refuses_leaves_the_running_fork_alone(deployed):
+    """Supervisor refuses a rebuild before removing anything when the host
+    has no internet, too little disk or an unhealthy system. The fork is
+    still serving the Echo then, and rolling back would only take it down."""
+    sim = deployed
+    pve(sim, "migrate")
+    sim.update(lambda st: st.update(fail=["rebuild"]))
+
+    p = deploy(sim, "--force", check=False)
+
+    assert p.returncode != 0
+    assert sim.app(ff.FORK)["state"] == "started"
+    assert f"{ff.FORK} is still running on its image" in p.stderr
+    assert "no image" not in p.stderr and "rollback" not in p.stderr
+
+
 def test_migrate_starts_the_fork_once_when_supervisor_made_no_data_folder(deployed):
     sim = deployed
     shutil.rmtree(sim.data / ff.FORK)
@@ -384,7 +507,7 @@ def test_status_reports_both_apps(deployed):
     pve(sim, "migrate")
     p = pve(sim, "status", "--logs", "5")
     assert f"{ff.FORK}: state started, boot auto" in p.stdout
-    assert f"{ff.UPSTREAM}: state stopped, boot manual" in p.stdout
+    assert f"{ff.UPSTREAM}: state error, boot manual" in p.stdout
     assert "migrated: from=" in p.stdout
     assert "Opening database" in p.stdout
 

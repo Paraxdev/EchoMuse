@@ -6,7 +6,9 @@
 #
 # The upstream app's data is COPIED and never modified, so going back is
 # starting it again (haos_rollback.sh). In order:
-#   1. stop the upstream app and turn off its start at boot
+#   1. stop the upstream app (until no container has its data mounted, since
+#      Supervisor reports a stopped EchoMuse app as 'error') and turn off its
+#      start at boot
 #   2. refuse to continue while any running container has its data mounted
 #   3. stop the fork app; if Supervisor has not made its data folder yet,
 #      start and stop it once
@@ -48,15 +50,6 @@ while [ $# -gt 0 ]; do
 done
 [ "$recopy" = 0 ] || [ "$keep" = 0 ] || die "--recopy and --keep-fork-data contradict each other"
 
-# What to do next if anything below fails, given how far it got.
-fail_hint=""
-on_exit() {
-    rc=$?
-    release_lock
-    if [ "$rc" != 0 ] && [ -n "$fail_hint" ]; then
-        printf '\n%s\n' "$fail_hint" >&2
-    fi
-}
 trap on_exit EXIT
 
 preflight
@@ -188,7 +181,9 @@ cat <<EOF
 
 Check, in this order:
   [ ] Settings > Apps: "EchoMuse (Paraxdev fork)" is started with Start on boot on,
-      and the upstream app ($UPSTREAM_SLUG) is stopped with Start on boot off.
+      and the upstream app ($UPSTREAM_SLUG) is stopped with Start on boot off
+      (Supervisor may show it as failed: the controller does not exit cleanly
+      when it is stopped).
   [ ] The fork's log reads "Opening database: /data/echomuse.db", then
       "Controller ready", and has no Traceback.
   [ ] The "EchoMuse fork" sidebar entry opens the dashboard, and its header

@@ -7,8 +7,9 @@
 # API through curl and jq for reads, boot mode and options, which the CLI has
 # no stable command for. preflight() checks both before anything changes.
 #
-# EMF_MNT relocates every path and EMF_POLL sets the poll interval; the tests
-# use them to run these scripts against a scratch tree and a fake docker.
+# EMF_MNT relocates every path, EMF_POLL sets the poll interval and
+# EMF_STOP_WAIT bounds stop_app's wait; the tests use them to run these
+# scripts against a scratch tree and a fake docker.
 # The globals below are read by the scripts that source this (SC2034).
 
 # Appended, so whatever started us (qemu-ga, a test) keeps its own order.
@@ -17,6 +18,7 @@ export PATH
 
 EMF_MNT=${EMF_MNT:-/mnt/data}
 EMF_POLL=${EMF_POLL:-2}
+EMF_STOP_WAIT=${EMF_STOP_WAIT:-120}
 WORK="$EMF_MNT/echomuse_fork"
 FORK_SLUG=local_echomuse_fork
 UPSTREAM_SLUG=${EMF_UPSTREAM_SLUG:-acc06409_controller-ea}
@@ -126,16 +128,46 @@ wait_state() {
     done
 }
 
+# A stopped EchoMuse app reads 'error', not 'stopped': the controller is PID 1
+# with no SIGTERM handler, so docker stop ends in SIGKILL (exit 137), and
+# Supervisor records a non-zero exit as a failure. So this waits for the app
+# to be anything but running and for no running container to have its data
+# folder mounted, and dies only if one still has it when the wait runs out.
 stop_app() {
     _s=$(app_field "$1" state) || die "cannot read the state of $1"
     case $_s in
-        started | startup)
-            say "Stopping $1 (it is $_s)."
-            ha_app stop "$1" || die "ha $HA_GROUP stop $1 failed"
-            wait_state "$1" stopped 120 || die "$1 did not stop"
+        started | startup) ;;
+        *)
+            say "$1 is $_s; nothing to stop."
+            return 0
             ;;
-        *) say "$1 is $_s; nothing to stop." ;;
     esac
+    say "Stopping $1 (it is $_s)."
+    ha_app stop "$1" || die "ha $HA_GROUP stop $1 failed"
+    _dir=$(data_dir "$1")
+    _step=$EMF_POLL
+    [ "$_step" -gt 0 ] || _step=1
+    _left=$((EMF_STOP_WAIT / _step))
+    while :; do
+        _s=$(app_field "$1" state 2>/dev/null) || _s=unknown
+        _users=$(mounted_by "$_dir")
+        if [ -z "$_users" ]; then
+            case $_s in
+                started | startup) ;;
+                *)
+                    say "$1 has stopped (Supervisor reports '$_s'); no running container has its data folder mounted."
+                    return 0
+                    ;;
+            esac
+        fi
+        if [ "$_left" -le 0 ]; then
+            [ -z "$_users" ] || die "$1 reads '$_s' ${EMF_STOP_WAIT}s after it was stopped, and its data folder is still mounted by: $_users"
+            warn "Supervisor still reports $1 as '$_s' after ${EMF_STOP_WAIT}s, but no running container has its data folder mounted; going on"
+            return 0
+        fi
+        _left=$((_left - 1))
+        sleep "$EMF_POLL"
+    done
 }
 
 start_app() {
@@ -213,6 +245,17 @@ release_lock() {
     if [ "${LOCKED:-0}" = 1 ]; then
         rm -rf "$WORK/lock"
         LOCKED=0
+    fi
+}
+
+# The EXIT trap of the changing scripts. fail_hint says what to do next if the
+# run fails from here on, given how far it got; each script keeps it current.
+fail_hint=""
+on_exit() {
+    _rc=$?
+    release_lock
+    if [ "$_rc" != 0 ] && [ -n "$fail_hint" ]; then
+        printf '\n%s\n' "$fail_hint" >&2
     fi
 }
 
