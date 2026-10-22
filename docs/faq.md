@@ -115,6 +115,28 @@ Assistant over HTTPS, or add that origin at
 browser. The entry has to match scheme, host **and port** exactly, so one for
 some other address does not cover it.
 
+### My Echo is plugged into the Home Assistant or Proxmox host and the wizard can't see it.
+**The wizard only reaches an Echo plugged into the computer your browser runs
+on.** It talks to the Echo through WebUSB (adb) and Web Serial (the emOS
+console), and both belong to the browser. The EchoMuse app has no USB access
+at all, so passing the Echo through to the Home Assistant VM does not help
+([#843](https://github.com/wilbowes/EchoMuse/issues/843)).
+
+- Plug the Echo into the PC you browse from and run the wizard in Chrome or
+  Edge there, over HTTPS or with the insecure-origin flag described above.
+- For console recovery on a Linux host such as Proxmox, use
+  `emos/tools/emconsole.py`, which needs only Python:
+  `python3 emconsole.py --list` finds the console, then
+  `python3 emconsole.py <serial> 'tail -n 50 /tmp/server.log'`. Don't pass the
+  Echo through to a VM as well: nothing in Home Assistant uses it, and the
+  host loses `/dev/ttyACM0`.
+- Never run the amonet or firebreak exploit inside a VM. The preloader is on
+  the bus for about 2 seconds, and USB passthrough attaches the device too late
+  to catch it. Run it on a physical machine.
+- Once it is set up, run the Echo from its own adapter rather than a USB port
+  on the host. A computer's port may not supply the power it needs (see
+  [The Dot boot-loops on one computer but not on another](#the-dot-boot-loops-on-one-computer-but-not-on-another)).
+
 ### The USB connection drops and re-enumerates every few seconds.
 `persist.sys.usb.config` is set to `mtp,adb`, and the composite gadget is what
 drops the bus — roughly every six seconds, with `device firmware changed` in

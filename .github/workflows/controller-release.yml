@@ -62,6 +62,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # Image references must be lowercase and github.repository_owner need
+      # not be: under an owner such as "Paraxdev", Docker refuses
+      # ghcr.io/Paraxdev/... Expressions have no lowercase function, so the
+      # name is made here once and the steps below read IMAGE.
+      - name: Image name
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: echo "IMAGE=ghcr.io/$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')/echomuse-controller" >> "$GITHUB_ENV"
+
       - name: Identify the channel
         id: channel
         run: |
@@ -145,7 +154,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ghcr.io/${{ github.repository_owner }}/echomuse-controller
+          images: ${{ env.IMAGE }}
           tags: |
             type=raw,value=${{ steps.channel.outputs.image_tag }}
             type=raw,value=latest,enable=${{ steps.channel.outputs.latest }}
@@ -166,7 +175,7 @@ jobs:
       # published layers takes seconds.
       - name: Check the image exists for this commit
         run: |
-          src="ghcr.io/${{ github.repository_owner }}/echomuse-controller:${{ steps.version.outputs.sha }}"
+          src="${IMAGE}:${{ steps.version.outputs.sha }}"
           if ! docker buildx imagetools inspect "$src" >/dev/null 2>&1; then
             echo "::error::No image published for this commit ($src)."
             echo "The main build has not run or did not finish for the commit being tagged."
@@ -217,7 +226,7 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           build-args: |
-            BASE=ghcr.io/${{ github.repository_owner }}/echomuse-controller:${{ steps.version.outputs.sha }}
+            BASE=${{ env.IMAGE }}:${{ steps.version.outputs.sha }}
             EM_CONTROLLER_VERSION=${{ steps.channel.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -228,7 +237,7 @@ jobs:
       - name: Attest build provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-name: ghcr.io/${{ github.repository_owner }}/echomuse-controller
+          subject-name: ${{ env.IMAGE }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
 
@@ -264,7 +273,7 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: image
-          image-ref: ghcr.io/${{ github.repository_owner }}/echomuse-controller@${{ steps.build.outputs.digest }}
+          image-ref: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
           format: cyclonedx
           output: sbom-controller-${{ steps.channel.outputs.version }}.cdx.json
 
@@ -302,7 +311,7 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: image
-          image-ref: ghcr.io/${{ github.repository_owner }}/echomuse-controller@${{ steps.build.outputs.digest }}
+          image-ref: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
           format: table
           severity: HIGH,CRITICAL
           ignore-unfixed: true

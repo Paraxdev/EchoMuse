@@ -36,6 +36,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # Image references must be lowercase and github.repository_owner need
+      # not be: under an owner such as "Paraxdev", Docker refuses
+      # ghcr.io/Paraxdev/... Expressions have no lowercase function, so the
+      # name is made here once and the steps below read IMAGE.
+      - name: Image name
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: echo "IMAGE=ghcr.io/$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')/echomuse-controller" >> "$GITHUB_ENV"
+
       # `latest` rather than a pinned version on purpose: this asks about the
       # image users are pulling today, which is what docker-compose.deploy.yml
       # gives them.
@@ -43,7 +52,7 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: image
-          image-ref: ghcr.io/${{ github.repository_owner }}/echomuse-controller:latest
+          image-ref: ${{ env.IMAGE }}:latest
           format: table
           severity: HIGH,CRITICAL
           ignore-unfixed: true
@@ -57,7 +66,7 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: image
-          image-ref: ghcr.io/${{ github.repository_owner }}/echomuse-controller:latest
+          image-ref: ${{ env.IMAGE }}:latest
           format: sarif
           output: trivy-results.sarif
           severity: MEDIUM,HIGH,CRITICAL

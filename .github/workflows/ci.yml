@@ -857,3 +857,14 @@ jobs:
             echo "::error::not gofmt-formatted -- run: gofmt -w cmd internal pkg tools"
             exit 1
           fi
+
+  fork-tools:
+    name: Fork tooling (shellcheck)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # tools/fork/ runs on the Proxmox host and on Home Assistant OS's
+      # busybox, so it is held to POSIX sh. What it does is tested in the
+      # controller suite (test_fork_haos.py); this is the lint.
+      - name: shellcheck tools/fork
+        run: shellcheck -x --shell=sh tools/fork/*.sh
