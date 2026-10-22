@@ -77,18 +77,18 @@ async function session() {
   return r.json.token;
 }
 
-async function seedDevice(token) {
+async function seedDevice(token, serial = SERIAL, label = LABEL) {
   const h = { Authorization: `Bearer ${token}` };
   const creds = await api('/api/provision/tls_credentials', {
-    method: 'POST', headers: h, body: JSON.stringify({ device_id: SERIAL }),
+    method: 'POST', headers: h, body: JSON.stringify({ device_id: serial }),
   });
   // 503 is a controller with no PKI, which would leave no device row and so no
   // device tabs at all.
   if (creds.status !== 200) {
     throw new Error(`tls_credentials returned ${creds.status}: ${body(creds)}`);
   }
-  const approved = await api(`/api/devices/${SERIAL}/approve`, {
-    method: 'POST', headers: h, body: JSON.stringify({ label: LABEL }),
+  const approved = await api(`/api/devices/${serial}/approve`, {
+    method: 'POST', headers: h, body: JSON.stringify({ label }),
   });
   if (approved.status !== 200 && approved.status !== 409) { // 409 = already approved
     throw new Error(`approve returned ${approved.status}: ${body(approved)}`);
@@ -219,6 +219,22 @@ await page.locator('.em-modal').waitFor({ state: 'detached', timeout: 10_000 });
 await page.getByRole('button', { name: 'Settings' }).click();
 await page.waitForSelector('.em-tabs', { timeout: 20_000 });
 for (const t of SETTINGS_TABS) await openTab('settings', t);
+
+// With one Echo its Config tab edits the fleet config directly, so the walk
+// above never draws the per-Echo form with its Scope switches. A second
+// approved Echo brings that form back, and it is checked on the first.
+await page.locator('.em-modal button[title="Close"]').first().click();
+await page.locator('.em-modal').waitFor({ state: 'detached', timeout: 10_000 });
+await seedDevice(token, `${SERIAL}-b`, `${LABEL} B`);
+await page.reload({ waitUntil: 'domcontentloaded' });
+await tile.waitFor({ state: 'visible', timeout: 20_000 });
+await tile.click();
+await page.waitForSelector('.em-tabs', { timeout: 20_000 });
+await openTab('two-echoes', 'config');
+// Reached is not enough here: the single-Echo form would pass the same walk.
+await page.getByText('Following fleet config', { exact: true }).first()
+  .waitFor({ state: 'visible', timeout: 10_000 })
+  .catch(() => problems.push('two-echoes/config: the scoped form never rendered'));
 
 await browser.close();
 
