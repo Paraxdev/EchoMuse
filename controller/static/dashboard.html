@@ -455,10 +455,20 @@
     /* A light system scrollbar on these dark panes read as a white strip. */
     .em-wizard-scroll, .em-console { scrollbar-width: thin; scrollbar-color: var(--muted) transparent; }
 
+    /* A text button that moves to another tab ("Status →" under a Home
+       card): reads as a link, is a button because it navigates in-page. */
+    .em-linkbtn {
+      background: none; border: none; padding: 0; cursor: pointer;
+      font-family: var(--font-mono); font-size: var(--fs-sm); color: var(--accent);
+      letter-spacing: var(--tracking-text);
+    }
+    .em-linkbtn:hover { text-decoration: underline; }
+
     /* Keyboard focus. Inline styles cannot express :focus-visible at all, so
        until now there was no focus ring anywhere in the dashboard. */
     .em-iconbtn:focus-visible,
     .em-pill:focus-visible,
+    .em-linkbtn:focus-visible,
     .em-tab:focus-visible,
     .em-input:focus-visible,
     [role="button"]:focus-visible,

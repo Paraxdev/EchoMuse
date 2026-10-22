@@ -35,7 +35,7 @@ const PASS = 'uat-console-check';
 // The two tab sets, read out of dashboard.jsx (Detail's TABS and Settings'
 // TAB_LABELS — the first is the raw key, the second is a label; TabBar is the
 // class both strips render through).
-const DEVICE_TABS   = ['status', 'activity', 'config', 'console', 'updates', 'logs'];
+const DEVICE_TABS   = ['home', 'status', 'activity', 'config', 'console', 'updates', 'logs'];
 const SETTINGS_TABS = ['Config', 'System', 'Users', 'Account', 'Support'];
 
 const problems = [];

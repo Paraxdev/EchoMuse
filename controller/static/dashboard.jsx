@@ -1554,10 +1554,252 @@ function ConnectivityTab({ device, row }) {
   );
 }
 
+// ─── Home tab ─────────────────────────────────────────────────────────────────
+// The first thing an Echo's window shows: is it up and if not why, how its
+// WiFi is doing, what wakes it and how often that turned out to be nothing,
+// its volume and ring, and whether anything needs updating. Built only from
+// what the controller already serves; each card names the tab with the
+// detail.
+
+// Turn totals over GET /api/devices/{id}/activity. days=1 is the last 24
+// hours bucketed by LOCAL day, so a window across midnight arrives as two
+// buckets and they are summed. Null when there is no answer, which is shown
+// as unknown: zero would claim a quiet day nobody measured.
+function _activityTotals(activity) {
+  const days = activity && Array.isArray(activity.days) ? activity.days : null;
+  if (!days) return null;
+  const out = { turns: 0, ok: 0, heardNothing: 0 };
+  for (const d of days) {
+    out.turns += d.turns || 0;
+    out.ok += d.ok || 0;
+    out.heardNothing += (d.outcomes && d.outcomes.no_speech) || 0;
+  }
+  return out;
+}
+
+// A turn outcome in words. no_speech is a turn that opened and heard nothing
+// said, which after a wake word is usually a false wake.
+function _outcomeLabel(outcome) {
+  if (outcome === 'no_speech') return 'heard nothing';
+  return (outcome || '?').replace(/_/g, ' ');
+}
+
+// An epoch-seconds time on the wall clock: the time alone for today, with
+// the date otherwise.
+function _clockTime(ts) {
+  const d = new Date(ts * 1000);
+  const today = d.toDateString() === new Date().toDateString();
+  return d.toLocaleString([], today
+    ? { hour: '2-digit', minute: '2-digit' }
+    : { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+// Why the control link last closed, from `lastDisconnect` ({at, why,
+// routine}). A controller from before the field sends nothing, and then this
+// is null and only last seen is shown: a guessed reason is worse than none.
+function _lastDrop(device) {
+  const ld = device.lastDisconnect;
+  if (!ld || !ld.why) return null;
+  return { at: ld.at || null, why: ld.routine ? `${ld.why} (routine)` : ld.why };
+}
+
+// Whether Home Assistant is on the other end of this Echo's voice port
+// (#349). Amber rather than red while it is not: HA reconnects by itself
+// from most of the ways this happens, and a row that shouts through an
+// ordinary restart is one people learn to skip (#301).
+function _voiceSatelliteRow(device) {
+  const vs = device.voiceSatellite;
+  const p  = vs?.port ?? device.esphome_port;
+  const at = p != null ? ` · port ${p}` : '';
+  if (!vs)            return { text: 'No satellite server', color: 'var(--error)' };
+  if (vs.haConnected) return { text: `HA connected${at}`, color: 'var(--ok)' };
+  if (vs.listening)   return { text: `Waiting for HA${at}`, color: 'var(--warn)' };
+  return { text: `Port down${at}`, color: 'var(--warn)' };
+}
+
+// Where the wake word is scored, from what the Echo REPORTS (em_listen):
+// configuration is what was asked for, the report is what is happening, and
+// only the report is stated as fact. Null while there is no report.
+function _wakeWhere(device) {
+  const l = device.connected ? device.listen : null;
+  if (!l) return null;
+  switch (l.state) {
+    case 'local':      return 'On this Echo';
+    case 'controller': return 'On the controller, streaming';
+    case 'diagnostic': return 'Both, diagnostic, streaming';
+    // "On this Echo" asked of firmware that cannot listen privately: it
+    // streams either way, and is scored where em_listen.detector says.
+    case 'legacy':     return device.owwTriggerCapable
+                         ? 'On this Echo, streaming' : 'On the controller, streaming';
+    case 'degraded':   return 'Nowhere: button only';
+    default:           return l.streams ? 'Switching, streaming' : 'Not reported yet';
+  }
+}
+
+// A wake threshold as stored, without the padding toFixed adds.
+function _thresholdText(t) {
+  return t == null ? '—' : String(Number(Number(t).toFixed(3)));
+}
+
+function HomeCard({ title, headline, tone, children, links }) {
+  return (
+    <Panel label={title} style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+      <div style={{ fontFamily: 'var(--font-sans)', fontSize: 'var(--fs-lg)', fontWeight: 600,
+                    color: tone || 'var(--text)', marginBottom: 'var(--space-4)', overflowWrap: 'anywhere' }}>
+        {headline}
+      </div>
+      <div style={{ flex: 1 }}>{children}</div>
+      {links && links.length > 0 && (
+        <div style={{ display: 'flex', gap: 'var(--space-8)', flexWrap: 'wrap', marginTop: 'var(--space-6)',
+                      paddingTop: 'var(--space-4)', borderTop: '1px solid var(--hairline)' }}>
+          {links.map(([label, go]) => (
+            <button key={label} type="button" className="em-linkbtn" onClick={go}>{label} →</button>
+          ))}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function HomeTab({ device, globalConfig, release, ctrlRelease, activity, isAdmin, onGo }) {
+  const s   = device.stats || null;
+  const lq  = device.linkQuality;
+  const cfg = effectiveConfig(globalConfig, device);
+  const link = _linkRow(device);
+  const drop = _lastDrop(device);
+  const ha   = _voiceSatelliteRow(device);
+  const totals = _activityTotals(activity);
+  const where  = _wakeWhere(device);
+
+  const row = (k, v, c, title) => (
+    <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: 'var(--space-6)', alignItems: 'baseline',
+                  padding: 'var(--space-3) 0', borderBottom: '1px solid var(--hairline)' }}>
+      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-sm)', color: 'var(--muted)', whiteSpace: 'nowrap' }}>{k}</span>
+      <span title={title} style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-md)', color: c || 'var(--text)',
+                                   textAlign: 'right', overflowWrap: 'anywhere', minWidth: 0 }}>{v}</span>
+    </div>
+  );
+  const note = text => (
+    <div className="em-field__help" style={{ marginTop: 'var(--space-4)', marginBottom: 0 }}>{text}</div>
+  );
+
+  const connHead = link.refused ? 'Refused' : device.connected ? 'Online' : 'Offline';
+  const connTone = link.refused ? 'var(--error)' : device.connected ? 'var(--ok)' : 'var(--warn)';
+
+  // Graded on packet loss, not signal, as the Status tab's Link tile is:
+  // full bars over a link that is losing frames still reads Poor.
+  const band = wifiBand(s?.wifiFreqMhz);
+  const lossTone = lq?.verdict === 'poor' ? 'var(--error)' : lq?.verdict === 'fair' ? 'var(--warn)'
+    : lq?.verdict === 'good' ? 'var(--ok)' : undefined;
+  const wifiHead = !device.connected ? 'Not connected'
+    : !s ? 'Waiting for stats'
+    : lq?.verdict ? `${LINK_VERDICT[lq.verdict] || lq.verdict} link` : 'Measuring link';
+
+  const wakeOff = device.wake_word === false;
+  const custom  = (cfg.owwModel || '').endsWith('.onnx');
+  const heard   = !totals ? '—' : totals.turns > 0 ? `${totals.heardNothing} of ${totals.turns}` : 'No turns';
+  const heardTone = totals && totals.heardNothing > totals.ok ? 'var(--warn)' : undefined;
+
+  // Volume is the Echo's own state, set from Home Assistant or its buttons;
+  // the dashboard only reports it (device/CLAUDE.md).
+  const vol = device.volume != null ? `${Math.round(device.volume * 100)}%`
+    : s?.volumePct != null ? `${s.volumePct}%` : '—';
+  const scene = cfg.ledScene ? cfg.ledScene.charAt(0).toUpperCase() + cfg.ledScene.slice(1) : '—';
+
+  // "Up to date" needs an offered version to be up to date WITH; with no
+  // release info it says so rather than reassuring.
+  const fw = device.update_in_progress ? { text: 'Updating…', tone: 'busy' }
+    : device.update_queued ? { text: 'Queued', tone: 'busy' }
+    : device.update_error ? { text: `Failed: ${device.update_error}`, tone: 'bad' }
+    : device.firmware_update ? { text: `${release?.version || 'Newer'} available`, tone: 'warn' }
+    : release?.version ? { text: 'Up to date', tone: 'ok' }
+    : { text: 'No release info', tone: 'unknown' };
+  const emos = device.baseOs !== 'emos' ? null
+    : device.emos_update_in_progress ? { text: device.emos_update_stage || 'Updating…', tone: 'busy' }
+    : device.emos_update_queued ? { text: 'Queued', tone: 'busy' }
+    : device.emos_update_error ? { text: `Failed: ${device.emos_update_error}`, tone: 'bad' }
+    : device.emosUpdateAvailable ? { text: `${_emosLabel(device.emosLatest)} available`, tone: 'warn' }
+    : device.emosOffer === 'current' ? { text: 'Up to date', tone: 'ok' }
+    : device.emosOffer === 'wizard' ? { text: `${_emosLabel(device.emosLatest)} installs with the wizard`, tone: 'unknown' }
+    : { text: device.emosVersion ? 'No release info' : 'Version not read yet', tone: 'unknown' };
+  // version.compare's status: 'current' covers a build ahead of the tag,
+  // and a dev build is 'unknown', which must not read as up to date.
+  const ctrl = ctrlRelease?.available && ctrlRelease.version ? { text: `${ctrlRelease.version} available`, tone: 'warn' }
+    : ctrlRelease?.status === 'current' ? { text: 'Up to date', tone: 'ok' }
+    : { text: ctrlRelease?.status === 'unknown' && ctrlRelease.version ? 'Version not comparable' : 'No release info', tone: 'unknown' };
+  const UPD_COLOR = { busy: 'var(--accent)', bad: 'var(--error)', warn: 'var(--warn)', ok: 'var(--ok)', unknown: 'var(--muted)' };
+  const upd = [fw, emos, ctrl].filter(Boolean);
+  const has = t => upd.some(p => p.tone === t);
+  const [updHead, updTone] = has('bad') ? ['An update failed', 'bad']
+    : has('busy') ? ['Updating', 'busy']
+    : has('warn') ? ['Update available', 'warn']
+    : upd.every(p => p.tone === 'ok') ? ['Up to date', 'ok'] : ['Not fully known', 'unknown'];
+
+  return (
+    <div style={{ display: 'grid', gap: 'var(--space-8)', alignItems: 'stretch',
+                  gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 300px), 1fr))' }}>
+      <HomeCard title="Connection" headline={connHead} tone={connTone}
+        links={[['Status', () => onGo('status')], ['Logs', () => onGo('logs')]]}>
+        {!device.connected && row('Last seen',
+          device.last_seen ? `${relTime(device.last_seen)} · ${_clockTime(device.last_seen)}` : '—')}
+        {drop && row(device.connected ? 'Last drop' : 'Why',
+          device.connected && drop.at ? `${relTime(drop.at)} · ${drop.why}` : drop.why,
+          device.connected ? undefined : 'var(--warn)',
+          drop.at ? _clockTime(drop.at) : undefined)}
+        {row('Link', link.label, link.color)}
+        {row('Home Assistant', ha.text, ha.color)}
+      </HomeCard>
+
+      <HomeCard title="WiFi" headline={wifiHead} tone={lossTone}
+        links={[['Link detail', () => onGo('status')], ['Change network', () => onGo('config')]]}>
+        {row('Network', s?.wifiSsid || '—')}
+        {row('Band', band ? `${band}${s?.wifiFreqMhz ? ` · ${s.wifiFreqMhz} MHz` : ''}` : '—')}
+        {row('Signal', s?.wifiRssi != null
+          ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--space-3)' }}>
+              {s.wifiRssi} dBm<SignalBars rssi={s.wifiRssi}/>
+            </span>
+          : '—')}
+        {row('Loss', lq?.lossPct != null ? `${lq.lossPct}%` : '—', lossTone)}
+        {row('Latency', device.rttMs != null ? `${device.rttMs} ms` : '—',
+             device.rttMs == null ? undefined : device.rttMs >= 1000 ? 'var(--error)'
+               : device.rttMs >= 200 ? 'var(--warn)' : undefined)}
+      </HomeCard>
+
+      <HomeCard title="Wake word" headline={wakeOff ? 'Off in Home Assistant' : wwModelLabel(cfg.owwModel)}
+        tone={wakeOff ? 'var(--warn)' : undefined}
+        links={[['Activity', () => onGo('activity')], ['Settings', () => onGo('config')]]}>
+        {row('Model', custom ? `${wwModelLabel(cfg.owwModel)} (custom)` : wwModelLabel(cfg.owwModel),
+             undefined, cfg.owwModel || undefined)}
+        {row('Threshold', _thresholdText(cfg.owwThreshold))}
+        {cfg.owwPatience != null && row('Patience', `${cfg.owwPatience} frame${cfg.owwPatience === 1 ? '' : 's'}`)}
+        {row('Scored', where || (device.connected ? 'Not reported yet' : 'Not reported while offline'))}
+        {row('Heard nothing · 24 h', heard, heardTone,
+             'Turns that opened and heard nothing said. After a wake word that is usually a false wake.')}
+        {totals && totals.turns > 0 && row('Answered · 24 h', String(totals.ok))}
+      </HomeCard>
+
+      <HomeCard title="Volume and ring" headline={vol}
+        links={[['Ring settings', () => onGo('config')]]}>
+        {row('Volume', device.connected || vol === '—' ? vol : `${vol} (last reported)`)}
+        {row('LED scene', scene)}
+        {note('Volume belongs to the Echo: change it from Home Assistant or its buttons.')}
+      </HomeCard>
+
+      <HomeCard title="Updates" headline={updHead} tone={UPD_COLOR[updTone]}
+        links={isAdmin ? [['Updates', () => onGo('updates')]] : []}>
+        {row('Firmware', fw.text, UPD_COLOR[fw.tone], device.firmware_ver || undefined)}
+        {emos && row('emOS', emos.text, UPD_COLOR[emos.tone], device.emosVersion || undefined)}
+        {row('Controller', ctrl.text, UPD_COLOR[ctrl.tone], ctrlRelease?.current || undefined)}
+      </HomeCard>
+    </div>
+  );
+}
+
 // ─── Device detail modal ──────────────────────────────────────────────────────
 
-function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDeviceConfigChange }) {
-  const [tab, setTab] = useState(() => device.approved ? 'status' : 'approve');
+function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDeviceConfigChange,
+                  ctrlRelease }) {
+  const [tab, setTab] = useState(() => device.approved ? 'home' : 'approve');
   // Seed from the EFFECTIVE config, not the raw stored one — see
   // effectiveConfig(). A migrated row's stored dict is not the truth.
   const [config, setConfig] = useState(() => effectiveConfig(globalConfig, device));
@@ -1603,14 +1845,21 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
   const [assetResult, setAssetResult] = useState(null);
   const fileInputRef = useRef(null);
   const [turns, setTurns] = useState([]);
+  // The last 24 hours from the turns table (GET .../activity?days=1), for
+  // Home and Activity. DB-backed, unlike owwNearMisses, which lives on the
+  // connection and restarts at zero with every reconnect.
+  const [activity24, setActivity24] = useState(null);
   const state = deviceState(device);
   const needsUpdate = !!device.firmware_update;
 
   const TABS = device.approved
-    ? (isAdmin ? ['status', 'activity', 'config', 'console', 'updates', 'logs'] : ['status', 'activity', 'config', 'logs'])
+    ? (isAdmin ? ['home', 'status', 'activity', 'config', 'console', 'updates', 'logs'] : ['home', 'status', 'activity', 'config', 'logs'])
     : ['approve'];
 
   useEffect(() => {
+    if (tab === 'home') {
+      API.get('/api/releases/latest').then(setRelease).catch(() => {});
+    }
     if (tab === 'logs') {
       setLogsLoading(true);
       API.get(`/api/devices/${device.device_id}/logs?limit=50`)
@@ -1661,6 +1910,19 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
       .catch(() => {});
     load();
     const iv = setInterval(load, 10000);
+    return () => { live = false; clearInterval(iv); };
+  }, [tab, device.device_id]);
+
+  // A minute between polls: it aggregates a day of turns server-side, and a
+  // day's count does not move faster than that matters.
+  useEffect(() => {
+    if (tab !== 'home' && tab !== 'activity') return;
+    let live = true;
+    const load = () => API.get(`/api/devices/${device.device_id}/activity?days=1`)
+      .then(a => { if (live) setActivity24(a); })
+      .catch(() => {});
+    load();
+    const iv = setInterval(load, 60000);
     return () => { live = false; clearInterval(iv); };
   }, [tab, device.device_id]);
 
@@ -2160,6 +2422,12 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
             </div>
           )}
 
+          {/* HOME */}
+          {tab === 'home' && (
+            <HomeTab device={device} globalConfig={globalConfig} release={release}
+              ctrlRelease={ctrlRelease} activity={activity24} isAdmin={isAdmin} onGo={setTab}/>
+          )}
+
           {/* STATUS */}
           {tab === 'status' && (() => {
             const s = device.stats || null;
@@ -2214,24 +2482,10 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                         The port stays, appended: it is what a stale HA config
                         entry is keyed on, so it is the first thing needed the
                         moment this row says Waiting. */}
-                    {row('Voice assistant', (() => {
-                      const vs = device.voiceSatellite;
-                      const p  = vs?.port ?? device.esphome_port;
-                      const at = p != null ? ` · port ${p}` : '';
-                      if (!vs)            return 'No satellite server';
-                      if (vs.haConnected) return `HA connected${at}`;
-                      if (vs.listening)   return `Waiting for HA${at}`;
-                      return `Port down${at}`;
-                    })(), (() => {
-                      const vs = device.voiceSatellite;
-                      // Not-connected is amber rather than red: HA reconnects
-                      // on its own from most of the ways this happens, and a
-                      // row that shouts during an ordinary restart is one
-                      // people learn to skip past — the #301 cry-wolf rule.
-                      if (!vs)            return 'var(--error)';
-                      if (vs.haConnected) return 'var(--ok)';
-                      return 'var(--warn)';
-                    })())}
+                    {(() => {
+                      const vs = _voiceSatelliteRow(device);
+                      return row('Voice assistant', vs.text, vs.color);
+                    })()}
                     {/* One row, not two. "Connected: Yes" plus "Last seen"
                         was redundant in both directions — while connected the
                         last-seen time says nothing, and while offline the
@@ -11560,6 +11814,7 @@ function App() {
           onApprove={() => API.get('/api/devices').then(setDevices).catch(() => {})}
           isAdmin={isAdmin}
           globalConfig={globalConfig}
+          ctrlRelease={ctrlRelease}
           onDeviceConfigChange={(device_id, patch) =>
             setDevices(prev => prev.map(d =>
               d.device_id === device_id ? { ...d, ...patch } : d
