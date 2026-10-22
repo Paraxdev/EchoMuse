@@ -133,7 +133,8 @@ at all, so passing the Echo through to the Home Assistant VM does not help
 - Never run the amonet or firebreak exploit inside a VM. The preloader is on
   the bus for about 2 seconds, and USB passthrough attaches the device too late
   to catch it. Run it on a physical machine.
-- Power the Echo from its own adapter, not from the host's USB port (see
+- Once it is set up, run the Echo from its own adapter rather than a USB port
+  on the host. A computer's port may not supply the power it needs (see
   [The Dot boot-loops on one computer but not on another](#the-dot-boot-loops-on-one-computer-but-not-on-another)).
 
 ### The USB connection drops and re-enumerates every few seconds.

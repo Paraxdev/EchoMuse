@@ -94,7 +94,7 @@ Or no clone at all: fetch `pve.sh` alone and let the VM clone and build, with
 `deploy --git` in step 1.
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/Paraxdev/EchoMuse/fork/forkops/tools/fork/pve.sh
+curl -fsSLO https://raw.githubusercontent.com/Paraxdev/EchoMuse/refs/heads/fork/forkops/tools/fork/pve.sh
 ```
 
 Both need the branch pushed to GitHub. From Windows, run any of the commands
@@ -217,12 +217,23 @@ fork firmware needs no release:
    ```
 
    The tag fetch is for the version string. `compile.sh` stamps
-   `git describe --match 'v*'`, and the controller can only read a version out
-   of the binary in the form `v2.19.0-ea.1-5-gabc1234` (a build past a tag) or
-   `YYYYMMDD-HHMM-dev` (a dirty tree). A clone without the tags stamps a bare
-   commit id, which still installs but is labelled `local-<time>`. Keep those
-   tags local: pushing them to the fork would start a release workflow for
-   every one of them once Actions is enabled.
+   `git describe --match 'v*'`, which on the fork today is a build past the
+   EA tag, such as `v2.19.0-ea.1-7-g9465e4a`. The Echo reports that version
+   once it runs the build, and the Updates tab orders it after
+   `v2.19.0-ea.1`, so that release is not offered over it (a newer upstream
+   release is, and installing it replaces the fork build). Without the tags
+   the binary carries a bare commit id, which cannot be ordered, so the
+   Updates tab offers upstream's newest firmware as an update over the fork
+   build, and an update of all devices would replace it.
+
+   Until the Echo reports its version, the controller labels the update
+   `local-<time>`: it reads a version out of the binary only in the forms
+   `v2.18.1-66-g9465e4a` (a build past a GA tag) and `YYYYMMDD-HHMM-dev` (a
+   dirty tree), not a build past an EA tag. The label is cosmetic, and the
+   install goes ahead. It also means the dashboard cannot warn that the Echo
+   already runs that build. Keep the tags local: pushing them to the fork
+   would start a release workflow for every one of them once Actions is
+   enabled.
 
 2. Upload it: dashboard > the Echo > **Updates** > **Local Build** > Choose
    file > Deploy. That is `POST /api/releases/upload` (admin, multipart field
