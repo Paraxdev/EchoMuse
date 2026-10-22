@@ -11,7 +11,9 @@
  *   - the udhcpc script is the whole of what a lease does to wlan0: deconfig
  *     ignored keeps a lapsed address (#871), a route left behind keeps an old
  *     router in front;
- *   - -a handed to a udhcpc that does not know it ends DHCP before it starts.
+ *   - -a handed to a udhcpc that does not know it ends DHCP before it starts;
+ *   - the evidence copy is the only record of an outage that survives the
+ *     power cycle, and every copy costs flash.
  *
  * init.c is included whole, as the other checks do, so this drives the real
  * functions. The udhcpc script and the arping probe are run for real, through
@@ -29,6 +31,7 @@
 
 #define LEDDIR  "/tmp/emos-netcheck.led"
 #define NETLOG  "/tmp/emos-netcheck.log"
+#define NETLAST "/tmp/emos-netcheck.last"
 #define ROUTES  "/tmp/emos-netcheck.route"
 #define main    init_main_unused
 
@@ -663,6 +666,221 @@ static void ours(void)
     rmdir(SBIN);
 }
 
+/* ── The evidence copy ──────────────────────────────────────────────────── */
+
+static void limiter(void)
+{
+    struct netlast n;
+    char why[48];
+    netlast_init(&n);
+
+    check(!netlast_due(&n, 0, why, sizeof why), "nothing happened, nothing "
+          "written");
+    netlast_event(&n, "carrier-lost");
+    check(netlast_due(&n, 100, why, sizeof why)
+          && strcmp(why, "carrier-lost") == 0,
+          "the first event of a boot is written at once");
+    check(!netlast_due(&n, 100, why, sizeof why), "... once");
+
+    netlast_event(&n, "watchdog-reassociate");
+    netlast_event(&n, "watchdog-reconnect");
+    int early = netlast_due(&n, 100 + NETLAST_GAP_S - 1, why, sizeof why);
+    check(!early, "the next waits out the gap");
+    check(netlast_due(&n, 100 + NETLAST_GAP_S, why, sizeof why)
+          && strcmp(why, "watchdog-reconnect") == 0,
+          "... and is then written, as the latest event");
+
+    netlast_event(&n, "watchdog-restart");
+    check(!netlast_due(&n, 100 + 10 * NETLAST_GAP_S, why, sizeof why),
+          "two per incident: a third is never written");
+
+    netlast_settled(&n);
+    netlast_event(&n, "carrier-lost");
+    check(netlast_due(&n, 100 + 10 * NETLAST_GAP_S, why, sizeof why),
+          "once the gateway answers, the next failure is a new incident");
+
+    netlast_settled(&n);
+    long last = 100 + 10 * NETLAST_GAP_S;
+    netlast_event(&n, "address-lost");
+    check(!netlast_due(&n, last + 60, why, sizeof why)
+          && netlast_due(&n, last + NETLAST_GAP_S, why, sizeof why),
+          "a new incident still waits out the gap");
+
+    netlast_init(&n);
+    int writes = 0;
+    for (long t = 0; t < 24 * 3600; t += 5) {
+        if (t % 240 == 0)
+            netlast_settled(&n);
+        else if (t % 60 == 0)
+            netlast_event(&n, "carrier-lost");
+        if (netlast_due(&n, t, why, sizeof why))
+            writes++;
+    }
+    check(writes <= 24 * 3600 / NETLAST_GAP_S + 1,
+          "a link failing all day: %d copies, %d KB of flash", writes,
+          writes * NETLAST_TAIL / 1024);
+}
+
+/* `lines` numbered lines of exactly `width` bytes each. */
+static void numbered(const char *path, const char *tag, int lines, int width)
+{
+    FILE *f = fopen(path, "w");
+    for (int i = 0; i < lines; i++) {
+        char l[256];
+        int k = snprintf(l, sizeof l, "%s %06d ", tag, i);
+        while (k < width - 1)
+            l[k++] = 'x';
+        l[k++] = '\n';
+        fwrite(l, 1, (size_t)k, f);
+    }
+    fclose(f);
+}
+
+static void reset_logs(void)
+{
+    unlink(NETLOG);
+    unlink(NETLOG ".1");
+    unlink(NETLAST);
+    unlink(NETLAST ".1");
+    unlink(NETLAST ".new");
+}
+
+static void evidence(void)
+{
+    size_t len;
+    char *b;
+
+    reset_logs();
+    numbered(NETLOG, "line", 2000, 40);           /* 80KB, past the tail */
+    check(netlast_write("# s\n") == 0, "a copy is written");
+    b = slurp(NETLAST, &len);
+    check(b && strncmp(b, "# s\nline ", 9) == 0,
+          "the summary leads, then the log from the start of a line");
+    check(b && len <= 4 + NETLAST_TAIL && len > 4 + NETLAST_TAIL - 40,
+          "about %d KB of the log (%zu bytes)", NETLAST_TAIL / 1024, len);
+    check(b && strstr(b, "line 001999 ") && b[len - 1] == '\n'
+          && strstr(b, "line 001999 ") + 40 == b + len,
+          "it ends at the last line logged");
+    free(b);
+
+    char *first = slurp(NETLAST, NULL);
+    netlast_write("# t\n");
+    char *prev = slurp(NETLAST ".1", NULL);
+    b = slurp(NETLAST, NULL);
+    check(first && prev && strcmp(first, prev) == 0 && b
+          && strncmp(b, "# t\n", 4) == 0,
+          "the copy before is kept as .1");
+    free(first);
+    free(prev);
+    free(b);
+
+    reset_logs();
+    numbered(NETLOG ".1", "old", 2000, 40);
+    numbered(NETLOG, "new", 10, 40);
+    netlast_write("# s\n");
+    b = slurp(NETLAST, &len);
+    {
+        char *o = b ? strstr(b, "old 001999 ") : NULL;
+        char *nw = b ? strstr(b, "new 000000 ") : NULL;
+        check(b && strncmp(b, "# s\nold ", 8) == 0 && o && nw
+              && o + 40 == nw && strstr(b, "new 000009 ") + 40 == b + len
+              && len <= 4 + NETLOG_CAP,
+              "a log just rotated is topped up from the rotated copy, "
+              "in order");
+    }
+    free(b);
+
+    reset_logs();
+    put(NETLOG ".1", "a\nb\n");
+    put(NETLOG, "c\n");
+    netlast_write("# s\n");
+    b = slurp(NETLAST, NULL);
+    check(b && strcmp(b, "# s\na\nb\nc\n") == 0,
+          "both logs short: all of both, no line dropped");
+    free(b);
+
+    reset_logs();
+    numbered(NETLOG, "full", NETLAST_TAIL / 32, 32);  /* exactly the tail */
+    netlast_write("# s\n");
+    b = slurp(NETLAST, &len);
+    check(b && len == 4 + NETLAST_TAIL && strncmp(b, "# s\nfull 000000 ", 16)
+          == 0, "a log exactly the size of the tail is copied whole");
+    free(b);
+
+    reset_logs();
+    numbered(NETLOG, "full", NETLAST_TAIL / 32 + 1, 32);
+    netlast_write("# s\n");
+    b = slurp(NETLAST, &len);
+    check(b && len == 4 + NETLAST_TAIL
+          && strncmp(b, "# s\nfull 000001 ", 16) == 0,
+          "one line more, cut on a line boundary: no line lost");
+    free(b);
+
+    reset_logs();
+    {
+        FILE *f = fopen(NETLOG, "w");
+        fputs("long first line, cut part way through by the tail......\n", f);
+        fclose(f);
+        numbered(NETLOG ".tmp", "full", NETLAST_TAIL / 32 - 1, 32);
+        char *rest = slurp(NETLOG ".tmp", NULL);
+        f = fopen(NETLOG, "a");
+        fputs(rest ? rest : "", f);
+        fclose(f);
+        free(rest);
+        unlink(NETLOG ".tmp");
+    }
+    netlast_write("# s\n");
+    b = slurp(NETLAST, &len);
+    check(b && len == 4 + NETLAST_TAIL - 32
+          && strncmp(b, "# s\nfull 000000 ", 16) == 0,
+          "cut part way through a line: the fragment is dropped");
+    free(b);
+
+    reset_logs();
+    netlast_write("# s\n");
+    b = slurp(NETLAST, NULL);
+    check(b && strcmp(b, "# s\n") == 0, "no log at all: the summary alone");
+    free(b);
+
+    /* The summary, as the controller will read it. */
+    reset_logs();
+    put(NETLOG, "wlan0: CTRL-EVENT-DISCONNECTED reason=4\n");
+    struct linkwd w;
+    linkwd_init(&w);
+    w.off_since = 1000;
+    w.steps = 2;
+    netlast_save("watchdog-restart", 1234, "192.168.1.1", &w);
+    b = slurp(NETLAST, NULL);
+    {
+        static const char lead[] =
+            "# emos-net-last why=watchdog-restart uptime=1234 wall=";
+        char *nl = b ? strchr(b, '\n') : NULL;
+        char *wall = b ? strstr(b, " wall=") : NULL;
+        int wall_ok = 0;
+        if (wall) {
+            wall += 6;
+            wall_ok = strncmp(wall, "unset ", 6) == 0
+                   || (strlen(wall) > 21 && wall[4] == '-' && wall[10] == 'T'
+                       && wall[19] == 'Z' && wall[20] == ' ');
+        }
+        check(b && strncmp(b, lead, sizeof lead - 1) == 0 && wall_ok
+              && nl && wall < nl,
+              "the summary leads with why, uptime and wall time");
+        check(b && strstr(b, " gateway=192.168.1.1 off_network=234 "
+                             "watchdog_steps=2 rx_packets=")
+              && nl && strstr(b, " tx_packets=") < nl
+              && strcmp(nl + 1, "wlan0: CTRL-EVENT-DISCONNECTED reason=4\n")
+                 == 0,
+              "... then the link's state, then the log");
+    }
+    free(b);
+    netlast_save("carrier-lost", 50, "", &w);
+    b = slurp(NETLAST, NULL);
+    check(b && strstr(b, " gateway=none "), "no gateway known: none");
+    free(b);
+    reset_logs();
+}
+
 /* ── Stopping the supplicant ─────────────────────────────────────────────── */
 
 static pid_t start(const char *script)
@@ -703,6 +921,8 @@ int main(void)
     probe();
     dhcp();
     ours();
+    limiter();
+    evidence();
     stopping();
 
     unlink(NETLOG);

@@ -2189,6 +2189,159 @@ static unsigned long long read_counter(const char *path)
     return n > 0 ? strtoull(b, NULL, 10) : 0;
 }
 
+/* ── Evidence that outlives the power cycle ──────────────────────────────────
+ *
+ * /run/net.log is tmpfs on purpose (see netlog), and pulling the plug is how
+ * people recover an Echo that has dropped off the network, so an outage
+ * nobody watched left nothing behind. On a link loss and on each watchdog
+ * step, the last NETLAST_TAIL bytes of the log go to NETLAST on /data behind a
+ * one-line summary, the copy before kept as NETLAST.1.
+ *
+ * Flash is rationed. At most NETLAST_PER_INCIDENT copies per incident, which
+ * ends when the gateway answers again: the first from when the trouble was
+ * noticed, the second showing what the watchdog then tried. Never two within
+ * NETLAST_GAP_S; an event inside the gap is written when it ends, with
+ * everything logged meanwhile. A link that fails all day costs about 1.5MB of
+ * writes, a working one none. */
+#ifndef NETLAST
+#define NETLAST "/data/emos/net.last"
+#endif
+#define NETLAST_TAIL         (32 * 1024)
+#define NETLAST_GAP_S        1800
+#define NETLAST_PER_INCIDENT 2
+
+struct netlast {
+    long last;        /* the last write this boot; -1 none */
+    int  writes;      /* in the current incident */
+    char why[48];     /* an event waiting to be written; "" none */
+};
+
+static void netlast_init(struct netlast *n)
+{
+    n->last = -1;
+    n->writes = 0;
+    n->why[0] = 0;
+}
+
+/* Something worth keeping happened; a later event replaces a waiting one. */
+static void netlast_event(struct netlast *n, const char *why)
+{
+    if (n->writes < NETLAST_PER_INCIDENT)
+        snprintf(n->why, sizeof n->why, "%s", why);
+}
+
+/* The gateway answered: the next failure is a new incident. */
+static void netlast_settled(struct netlast *n)
+{
+    n->writes = 0;
+}
+
+/* 1, with the event copied to `why`, when a copy should be written now. */
+static int netlast_due(struct netlast *n, long now, char *why, size_t sz)
+{
+    if (!n->why[0] || n->writes >= NETLAST_PER_INCIDENT)
+        return 0;
+    if (n->last >= 0 && now - n->last < NETLAST_GAP_S)
+        return 0;
+    snprintf(why, sz, "%s", n->why);
+    n->why[0] = 0;
+    n->last = now;
+    n->writes++;
+    return 1;
+}
+
+static size_t read_at(const char *path, off_t off, char *buf, size_t len)
+{
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return 0;
+    size_t got = 0;
+    while (got < len) {
+        ssize_t r = pread(fd, buf + got, len - got, off + (off_t)got);
+        if (r <= 0)
+            break;
+        got += (size_t)r;
+    }
+    close(fd);
+    return got;
+}
+
+/* Up to `cap` bytes off the end of the network log, reaching into the rotated
+ * copy when the live one is shorter, and starting on a line. */
+static size_t netlog_tail(char *buf, size_t cap)
+{
+    struct stat s;
+    off_t n0 = stat(NETLOG, &s) == 0 ? s.st_size : 0;
+    off_t n1 = stat(NETLOG ".1", &s) == 0 ? s.st_size : 0;
+    off_t take0 = n0 < (off_t)cap ? n0 : (off_t)cap;
+    off_t take1 = (off_t)cap - take0 < n1 ? (off_t)cap - take0 : n1;
+    size_t len = read_at(NETLOG ".1", n1 - take1, buf, (size_t)take1);
+    len += read_at(NETLOG, n0 - take0, buf + len, (size_t)take0);
+    /* The oldest file used was cut part way through a line: that first line
+     * is a fragment, and is dropped. */
+    char before = '\n';
+    if (take1 > 0 && take1 < n1)
+        read_at(NETLOG ".1", n1 - take1 - 1, &before, 1);
+    else if (take1 == 0 && take0 < n0)
+        read_at(NETLOG, n0 - take0 - 1, &before, 1);
+    char *nl = before != '\n' ? memchr(buf, '\n', len) : NULL;
+    if (nl) {
+        size_t skip = (size_t)(nl + 1 - buf);
+        memmove(buf, nl + 1, len - skip);
+        len -= skip;
+    }
+    return len;
+}
+
+/* `summary`, then the log's tail, as NETLAST; the copy it replaces becomes
+ * NETLAST.1. Written aside and renamed, so a power cut mid-write leaves the
+ * old copy rather than half a new one. */
+static int netlast_write(const char *summary)
+{
+    static char tail[NETLAST_TAIL];
+    size_t len = netlog_tail(tail, sizeof tail);
+    int fd = open(NETLAST ".new", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0)
+        return -1;
+    size_t sl = strlen(summary);
+    int ok = write(fd, summary, sl) == (ssize_t)sl
+          && write(fd, tail, len) == (ssize_t)len;
+    ok = fsync(fd) == 0 && ok;
+    close(fd);
+    if (!ok) {
+        unlink(NETLAST ".new");
+        return -1;
+    }
+    rename(NETLAST, NETLAST ".1");
+    return rename(NETLAST ".new", NETLAST);
+}
+
+/* The summary leads the copy as key=value pairs, for a person at the console
+ * and for whatever collects the file later. */
+static void netlast_save(const char *why, long now, const char *gw,
+                         const struct linkwd *w)
+{
+    char wall[32] = "unset", line[384];
+    time_t t = time(NULL);
+    struct tm tm;
+    /* The clock reads 2010 until the controller sets it (time_ms on its ack),
+     * and a date from then would be read as a real one. */
+    if (t > 1577836800 && gmtime_r(&t, &tm))
+        strftime(wall, sizeof wall, "%Y-%m-%dT%H:%M:%SZ", &tm);
+    snprintf(line, sizeof line,
+             "# emos-net-last why=%s uptime=%ld wall=%s carrier=%d address=%d "
+             "gateway=%s off_network=%ld watchdog_steps=%d rx_packets=%llu "
+             "tx_packets=%llu\n",
+             why, now, wall,
+             readint("/sys/class/net/wlan0/carrier") == 1, has_ip("wlan0"),
+             gw && gw[0] ? gw : "none",
+             w->off_since >= 0 ? now - w->off_since : 0, w->steps,
+             read_counter("/sys/class/net/wlan0/statistics/rx_packets"),
+             read_counter("/sys/class/net/wlan0/statistics/tx_packets"));
+    int r = netlast_write(line);
+    netlog("net.last %s (%s)\n", r == 0 ? "written" : "NOT written", why);
+}
+
 /* Ends a child and reaps it, SIGKILL after 5s. Left set when even that does
  * not reap it (a supplicant stuck in the driver), so no second one is started
  * beside it; the reaper at the top of the loop clears it if it ever exits. */
@@ -2373,15 +2526,17 @@ static void net_main(void)
      * exist and are not working, which is a fault worth showing. Waiting with
      * NO conf is not a fault and never turns it red -- see below. */
     int nocarrier = 0, said_fail = 0, said_noconf = 0;
-    /* The link watchdog; see linkwd_step. */
+    /* The link watchdog and its evidence; see linkwd_step and netlast_save. */
     char *wpa_disconnect[] = { reassoc[0], pflag, "-iwlan0", "disconnect", NULL };
     char *wpa_reconnect[]  = { reassoc[0], pflag, "-iwlan0", "reconnect", NULL };
     char *wpa_status[]     = { reassoc[0], pflag, "-iwlan0", "status", NULL };
     struct linkwd wd;
+    struct netlast nl;
     linkwd_init(&wd);
+    netlast_init(&nl);
     long next_probe = 0;
     int no_arping = 0, had_carrier = 0, had_ip = 0, silent = 0;
-    char gw[32] = "";
+    char gw[32] = "", why[48];
 
     for (;;) {
         pid_t d;
@@ -2456,8 +2611,10 @@ static void net_main(void)
                 led_fail();
             }
             if (netup) {
-                if (had_carrier)
+                if (had_carrier) {
                     netlog("link lost: no carrier\n");
+                    netlast_event(&nl, "carrier-lost");
+                }
                 link = LINK_NOCARRIER;
             }
             had_carrier = had_ip = 0;
@@ -2525,8 +2682,10 @@ static void net_main(void)
                     dry = 0;
                 }
                 if (netup) {
-                    if (had_ip)
+                    if (had_ip) {
                         netlog("link lost: no address\n");
+                        netlast_event(&nl, "address-lost");
+                    }
                     link = LINK_NOADDR;
                 }
                 had_ip = 0;
@@ -2539,9 +2698,12 @@ static void net_main(void)
                        "rx_packets %llu\n", gw, read_counter(
                            "/sys/class/net/wlan0/statistics/rx_packets"));
             silent = link == LINK_SILENT;
-            if (link == LINK_OK && wd.off_since >= 0)
-                netlog("link watchdog: gateway %s answering again after "
-                       "%lds off the network\n", gw, now - wd.off_since);
+            if (link == LINK_OK) {
+                if (wd.off_since >= 0)
+                    netlog("link watchdog: gateway %s answering again after "
+                           "%lds off the network\n", gw, now - wd.off_since);
+                netlast_settled(&nl);
+            }
             int act = linkwd_step(&wd, now, link);
             if (act != WD_NONE) {
                 netlog("link watchdog: off the network %lds, rx_packets %llu, "
@@ -2549,6 +2711,10 @@ static void net_main(void)
                        read_counter("/sys/class/net/wlan0/statistics/rx_packets"),
                        wd.steps, wd_step_name[act]);
                 run_wait(wpa_status);           /* its answer lands in the log */
+                snprintf(why, sizeof why, "watchdog-%s", wd_step_name[act]);
+                netlast_event(&nl, why);
+                if (netlast_due(&nl, now, why, sizeof why))
+                    netlast_save(why, now, gw, &wd);
                 switch (act) {
                 case WD_REASSOC:
                     run_wait(reassoc);
@@ -2574,6 +2740,8 @@ static void net_main(void)
                 }
             }
         }
+        if (netlast_due(&nl, now, why, sizeof why))
+            netlast_save(why, now, gw, &wd);
         sleep(5);
     }
 }
