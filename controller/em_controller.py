@@ -95,6 +95,7 @@ import em_pacing
 import em_platform
 import em_tcp
 import em_wsclose
+import em_keepalive
 import em_rttlog
 import em_eq
 import em_limiter
@@ -304,8 +305,9 @@ WAKE_RESTART_HEALTHY_S     = 60.0
 
 PING_INTERVAL_SEC = 5.0
 
-# WebSocket keepalive on every device plane. The timeout is how long a ping may
-# go unanswered before the link is declared dead, and 10s was shorter than the
+# WebSocket keepalive on every device plane, though /data closes by its own
+# rule (em_keepalive). Elsewhere the timeout is how long a ping may go
+# unanswered before the link is declared dead, and 10s was shorter than the
 # loss bursts this link actually has: with the BLE scan running, a Dot loses
 # enough frames that TCP's retransmits alone can outlast it, and the overnight
 # `1011 keepalive ping timeout` closes were exactly that (2026-09-23) — a live
@@ -6118,27 +6120,18 @@ async def main():
     mdns_task = asyncio.create_task(_mdns_refresh_loop(azc, info))
 
     log.info(f"WebSocket server starting on {SERVER_HOST}:{SERVER_PORT}")
+    # Shared, so the plain and TLS listeners cannot disagree on liveness.
+    link_opts = dict(ping_interval=WS_PING_INTERVAL_S, ping_timeout=WS_PING_TIMEOUT_S,
+                     max_size=10 * 1024 * 1024,
+                     create_connection=em_keepalive.DeviceConnection)
 
     try:
         async with contextlib.AsyncExitStack() as stack:
             await stack.enter_async_context(websockets.serve(
-                router,
-                SERVER_HOST,
-                SERVER_PORT,
-                ping_interval=WS_PING_INTERVAL_S,
-                ping_timeout=WS_PING_TIMEOUT_S,
-                max_size=10 * 1024 * 1024,
-            ))
+                router, SERVER_HOST, SERVER_PORT, **link_opts))
             if tls_ctx is not None:
                 await stack.enter_async_context(websockets.serve(
-                    router_tls,
-                    SERVER_HOST,
-                    SERVER_TLS_PORT,
-                    ssl=tls_ctx,
-                    ping_interval=WS_PING_INTERVAL_S,
-                    ping_timeout=WS_PING_TIMEOUT_S,
-                    max_size=10 * 1024 * 1024,
-                ))
+                    router_tls, SERVER_HOST, SERVER_TLS_PORT, ssl=tls_ctx, **link_opts))
                 log.info(f"Device-link TLS (wss) listening on {SERVER_HOST}:{SERVER_TLS_PORT}")
             if REQUIRE_DEVICE_TLS:
                 log.info("REQUIRE_DEVICE_TLS=1 — plain/tokenless device connections will be rejected")
