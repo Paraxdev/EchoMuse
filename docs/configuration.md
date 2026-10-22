@@ -341,10 +341,27 @@ The confidence bar the recogniser must clear.
 - Toward **Eager**: catches you more reliably, but expect the occasional
   ghost activation.
 
-**How to tune it**: the Status tab counts **near-misses** — moments where the
+**How to tune it**: the Activity tab counts **near-misses**, moments where the
 score came close but didn't trigger. If you're being ignored and see
 near-misses climbing, move one step toward Eager. If it wakes up when nobody
-spoke, move toward Precise.
+spoke, move toward Precise, or raise **Patience**.
+
+### Patience
+How many 80 ms frames in a row must reach the Sensitivity threshold before
+it counts as a wake, from 1 to 4. The default is 2: a spoken wake word stays
+above the threshold for several frames as you say it, while a click, a knock
+or a bump on the table is over in one, so 2 ignores those at the cost of
+80 ms on a real wake. 1 is how EchoMuse behaved before this setting existed.
+Raise it to 3 if single sounds still wake the Echo; go back to 1 if a short
+wake word starts being missed.
+
+When the controller listens for the wake word, it applies Patience itself
+and its log says how many frames each wake held, and logs a run that was too
+short as "not a wake". An Echo set to **On this Echo** applies it only with
+firmware that supports it (it announces `oww_patience`); on older firmware
+the control is shown disabled with the reason, and that Echo wakes on a
+single frame. Patience does not apply to the lower **Barge threshold**, which
+has its own rule.
 
 ### Barge-in
 Lets the wake word **interrupt the assistant mid-turn** — say the wake word

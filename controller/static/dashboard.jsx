@@ -2460,6 +2460,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 remoteVolumeArcCapable={!device.connected || !!device.remoteVolumeArcCapable}
                 responseLevelCapable={!device.connected || !!device.responseLevelCapable}
                 wakeMicCapable={!device.connected || !!device.wakeMicCapable}
+                patienceCapable={!device.connected || !!device.owwPatienceCapable}
                 sendspinCapable={!device.connected || !!device.sendspinCapable}
                 sendspinPanel={device.connected && device.sendspinCapable
                   ? <SendspinPairing deviceId={device.device_id} status={device.sendspin} isAdmin={isAdmin}/>
@@ -9612,6 +9613,16 @@ function onDeviceMode(config) {
   return ['off', 'shadow', 'on'].includes(v) ? v : 'off';
 }
 
+// Who decides a wake, resolved the way em_shadow.effective_mode resolves it:
+// "on" against firmware that cannot trigger runs as shadow, so the controller
+// still decides there. 'both' is shadow: the controller decides and the Echo
+// scores beside it for comparison.
+function wakeDetector(config, triggerCapable) {
+  const mode = onDeviceMode(config);
+  if (mode === 'on') return triggerCapable ? 'device' : 'both';
+  return mode === 'shadow' ? 'both' : 'controller';
+}
+
 // What an Echo is actually doing with its microphone, from its own report
 // (em_listen.resolve via /api/devices `listen`). One line, and it never says
 // private unless the Echo said so: `streams === null` is "not known yet".
@@ -9650,6 +9661,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                             remoteVolumeArcCapable = true,
                             responseLevelCapable = true,
                             wakeMicCapable = true,
+                            patienceCapable = true,
                             sendspinCapable = true, sendspinPanel = null,
                             bleConnectCapable = true, blePanel = null }) {
   // emosFleet defaults TRUE for the same reason the capability props above do,
@@ -9789,6 +9801,10 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
   const bargeT = config.bargeInThreshold ?? 0.25;
   const bargeTrack = Math.min(BARGE_T_MAX, Math.max(BARGE_T_MIN, reflectBarge(bargeT)));
   const wakeT = config.owwThreshold ?? 0.5;
+  // An Echo that decides its own wakes applies owwPatience only on firmware
+  // announcing oww_patience; anywhere the controller decides, it applies it.
+  const wakeBy = wakeDetector(config, triggerCapable);
+  const patienceOff = wakeBy === 'device' && !patienceCapable;
 
   const bands = config.eqBands ?? [0,0,0,0,0,0,0,0];
   const RING_SCENES = [
@@ -9958,10 +9974,21 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
         </StageAdvanced>
       </Stage>
 
-      {/* 02 WAKE WORD */}
+      {/* 02 WAKE WORD. The chip and the first sentence follow where the wake
+          is decided, which the detection setting below chooses. Neither says
+          what the Echo sends: that is its own report, under that setting. */}
       <Stage n="02" title="Wake word"
-        chips={<ScopeChip tone="controller">Controller</ScopeChip>}
-        desc="openwakeword scores the continuous mic stream on the controller. Sensitivity sets the detection threshold — attempts that score close but miss are counted as near-misses (Status tab)."
+        chips={<>
+          {wakeBy !== 'device' && <ScopeChip tone="controller">Controller</ScopeChip>}
+          {wakeBy !== 'controller' && <ScopeChip tone="device">Device</ScopeChip>}
+        </>}
+        desc={(wakeBy === 'device'
+            ? 'The Echo scores its own microphone with openwakeword and decides when it has heard the wake word.'
+            : wakeBy === 'both'
+              ? 'openwakeword scores the continuous mic stream on the controller, which decides; the Echo scores it too, for comparison.'
+              : 'openwakeword scores the continuous mic stream on the controller.')
+          + ' Sensitivity sets the detection threshold and Patience how many frames in a row must reach it.'
+          + (wakeBy === 'device' ? '' : ' Attempts that score close but miss are counted as near-misses (Activity tab).')}
         scope={scopeEl('wakeword')} dim={secStyle('wakeword')}>
         <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--space-12)', alignItems: 'start' }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--space-3)', ...inputStyle }}>
@@ -10023,6 +10050,18 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                 <span style={{ fontFamily: mono, fontSize: 'var(--fs-xs)', color: 'var(--muted)' }}>Precise</span>
                 <span style={{ fontFamily: mono, fontSize: 'var(--fs-xs)', color: 'var(--muted)' }}>Eager</span>
               </div>
+            </div>
+            {/* Four values, so a select. Disabled with the reason where the
+                Echo decides its own wakes on firmware that cannot apply it. */}
+            <div style={{ marginTop: 'var(--space-8)', ...inputStyle }}>
+              <Select label="Patience"
+                sub={patienceOff
+                  ? 'needs newer firmware on this Echo while it listens for the wake word itself'
+                  : 'Frames in a row above the threshold before it wakes. 2 ignores single clicks and bumps.'}
+                disabled={patienceOff}
+                value={config.owwPatience ?? 2}
+                options={[1, 2, 3, 4].map(n => ({ value: n, label: String(n) }))}
+                onChange={v => set('owwPatience', v)}/>
             </div>
             <div style={{ marginTop: 'var(--space-8)', ...inputStyle }}>
               <Toggle label="Speex denoise" sub="cleans audio before scoring — try in noisy rooms" value={config.owwSpeexNs ?? false} onChange={v => set('owwSpeexNs', v)}/>
