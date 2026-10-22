@@ -81,6 +81,41 @@ def display_name(model_name: str) -> str:
     return _VERSION_SUFFIX.sub("", prediction_key(model_name)).replace("_", " ")
 
 
+def env_fallback_note(env, fleet: dict) -> str | None:
+    """
+    A warning for an OWW_MODEL or OWW_THRESHOLD that is not what the fleet
+    runs, or None.
+
+    Both read like the wake word in use, and the add-on's oww_model and
+    oww_threshold options set them, but they are only the controller's
+    fallbacks for a saved value that cannot be read: the fleet config always
+    carries owwModel and owwThreshold, from DEFAULT_DEVICE_CONFIG if nothing
+    else, and that is what is pushed and scored. On one install the options
+    read hey_jarvis at 0.5 while every Echo ran a custom model at 0.175
+    (October 2026), and were taken for what was running. An unset variable
+    claims nothing, so it is not compared.
+    """
+    env_model, env_threshold = env.get("OWW_MODEL"), env.get("OWW_THRESHOLD")
+    fleet_model, fleet_threshold = fleet.get("owwModel"), fleet.get("owwThreshold")
+    differs = []
+    if env_model and fleet_model and f"{env_model}_v0.1" != fleet_model:
+        differs.append(f"OWW_MODEL={env_model}")
+    try:
+        if env_threshold and fleet_threshold is not None and \
+                abs(float(env_threshold) - float(fleet_threshold)) > 1e-9:
+            differs.append(f"OWW_THRESHOLD={env_threshold}")
+    except (TypeError, ValueError):
+        pass
+    if not differs:
+        return None
+    return (f"{' and '.join(differs)} (the add-on's oww_model / oww_threshold) "
+            f"are fallbacks and not in effect: the fleet wake word set in the "
+            f"dashboard under Config, Wake word is "
+            f"{display_name(fleet_model) if fleet_model else 'unset'} at "
+            f"{fleet_threshold}, and an "
+            f"Echo overriding that section runs its own")
+
+
 def models_dir(db_path: str | None = None) -> Path:
     """
     Resolve the custom-models directory: `oww_models/` beside the SQLite

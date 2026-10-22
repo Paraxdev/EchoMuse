@@ -6078,6 +6078,9 @@ async def event_loop_lag_monitor(interval: float = 1.0,
 async def main():
     log.info(f"EchoMuse Controller {CONTROLLER_VERSION}")
     db.init(DB_PATH)
+    if note := em_oww_models.env_fallback_note(
+            os.environ, await asyncio.to_thread(db.get_global_device_config)):
+        log.warning(note)
     auth.maybe_generate_bootstrap_token()
     em_player.init(
         get_device=em_state.devices.get,

@@ -87,8 +87,8 @@ screen and you will re-enter these by hand:
 | `SERVER_IP` | **Controller LAN IP address** |
 | `SERVER_HOST` | **Bind address** |
 | `MDNS_NAME` | **mDNS service name** |
-| `OWW_MODEL` | **Wake word model** |
-| `OWW_THRESHOLD` | **Wake word sensitivity** |
+| `OWW_MODEL` | **Wake word model (fallback)** |
+| `OWW_THRESHOLD` | **Wake word sensitivity (fallback)** |
 | `DEVICE_APPROVAL` | **Device approval policy** |
 | `REQUIRE_DEVICE_TLS` | **Require encrypted device connections** |
 | `ESPHOME_PROJECT_VERSION` | **ESPHome project version** |

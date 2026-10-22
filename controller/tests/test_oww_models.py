@@ -156,3 +156,47 @@ def test_display_name_matches_openwakeword_own_names():
         assert owm.display_name(stem) == name.replace("_", " "), (
             f"display_name({stem!r}) disagrees with openwakeword's own name "
             f"for the model, {name!r}")
+
+
+# ─── env_fallback_note ───────────────────────────────────────────────────────
+# OWW_MODEL / OWW_THRESHOLD (and the add-on options that set them) read like
+# the wake word in use and are only fallbacks: the fleet config always has
+# owwModel and owwThreshold, and that is what runs.
+
+FLEET = {"owwModel": "/data/oww_models/mywake_20260101_120000.onnx",
+         "owwThreshold": 0.175}
+
+
+def test_env_fallback_note_names_what_differs_and_what_runs():
+    note = owm.env_fallback_note(
+        {"OWW_MODEL": "hey_jarvis", "OWW_THRESHOLD": "0.5"}, FLEET)
+    assert note.startswith("OWW_MODEL=hey_jarvis and OWW_THRESHOLD=0.5 ")
+    assert "not in effect" in note
+    assert "mywake 20260101 120000 at 0.175" in note
+
+
+def test_env_fallback_note_is_silent_when_they_agree():
+    fleet = {"owwModel": "hey_jarvis_v0.1", "owwThreshold": 0.5}
+    assert owm.env_fallback_note(
+        {"OWW_MODEL": "hey_jarvis", "OWW_THRESHOLD": "0.50"}, fleet) is None
+
+
+def test_env_fallback_note_ignores_an_unset_variable():
+    assert owm.env_fallback_note({}, FLEET) is None
+    note = owm.env_fallback_note({"OWW_THRESHOLD": "0.5"}, FLEET)
+    assert note.startswith("OWW_THRESHOLD=0.5 ") and "OWW_MODEL=" not in note
+
+
+def test_env_fallback_note_survives_values_it_cannot_compare():
+    assert owm.env_fallback_note({"OWW_THRESHOLD": "abc"}, FLEET) is None
+    assert owm.env_fallback_note(
+        {"OWW_THRESHOLD": "0.5"}, {"owwThreshold": None}) is None
+    note = owm.env_fallback_note({"OWW_THRESHOLD": "0.5"}, {"owwThreshold": 0.3})
+    assert "unset at 0.3" in note
+
+
+def test_the_controller_warns_at_start():
+    import _sources
+    main = _sources.def_source("em_controller.main")
+    assert "em_oww_models.env_fallback_note(" in main
+    assert "os.environ" in main
