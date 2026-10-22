@@ -2759,6 +2759,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                         : assets.status === 'installed' ? 'Installed'
                         : assets.status === 'outdated' ? 'Out of date'
                         : assets.status === 'blocked' ? 'Not enough space'
+                        : assets.status === 'unknown' && assets.connected ? 'Could not read the device, state unknown'
                         : assets.status === 'unknown' ? 'Device offline — state unknown'
                         : 'Not installed'}
                     </span>

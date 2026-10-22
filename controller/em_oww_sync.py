@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 import em_config_types
 import em_db as db
@@ -27,6 +28,7 @@ import em_ota
 import em_shadow
 import em_shell
 import em_state
+import em_tasks
 
 log = logging.getLogger("echomuse.api")
 
@@ -37,9 +39,15 @@ async def device_state(live) -> dict:
     One shell round trip. `md5sum` is asked for per file rather than with a
     glob so a missing directory yields an empty inventory rather than an
     error line that could be mistaken for one.
+
+    Raises em_shell.ShellError when the listing did not demonstrably finish.
+    The FREE line is printed last, so a listing without it was cut short, and
+    an empty inventory read from it is "could not look", never "nothing
+    installed": that reading pushed the whole set, 11.7MB of runtime first,
+    each time a listing failed.
     """
     d = em_oww_assets.DEVICE_DIR
-    out = await em_shell.run(live, (
+    out = await em_shell.run_strict(live, (
         f'for f in {d}/*.so {d}/*.onnx; do '
         f'[ -f "$f" ] && echo "$(busybox md5sum "$f" | busybox cut -d\" \" -f1) '
         f'$(busybox stat -c %Y "$f") $f"; done; '
@@ -47,9 +55,13 @@ async def device_state(live) -> dict:
     ), timeout=120.0)
 
     free_mb = None
+    saw_free = False
     lines = []
     for line in out.splitlines():
-        if line.startswith("FREE "):
+        # Bare "FREE" too: an empty df is a line the strip left without its
+        # space, still printed, so the listing before it is complete.
+        if line.startswith("FREE"):
+            saw_free = True
             # The whole df row, parsed in Python: the available column's INDEX
             # is not stable (busybox wraps a long filesystem name onto its own
             # line) and an awk field number silently yielded "65%" here, which
@@ -57,6 +69,9 @@ async def device_state(live) -> dict:
             free_mb = em_oww_assets.parse_free_mb(line[5:])
         else:
             lines.append(line)
+    if not saw_free:
+        raise em_shell.ShellError(f"the asset listing ended without its FREE "
+                                  f"line ({len(out)} bytes)")
     return {
         "installed": em_oww_assets.parse_device_listing("\n".join(lines)),
         "free_mb": free_mb,
@@ -189,7 +204,66 @@ async def install_then_switch(device_id: str, model: str) -> None:
     log.info(f"[api] [{device_id}] wake word switched to {model} after install")
 
 
-async def reconcile(device_id: str, live) -> None:
+# A connect-time push at least this big waits for a settled, usable link. A
+# lone classifier or the VAD model is under it and goes straight away.
+PUSH_GATE_BYTES = 2 * 1024 * 1024
+# How long a connection must have been up before such a push starts. Pushes
+# that started within seconds of a reconnect are the ones that died (the
+# 11.7MB runtime on 2026-10-21, the control plane gone 7s after it began),
+# and a link that has just come back is the likeliest to go again.
+SETTLE_S = 60.0
+# How often a held push looks at the link again.
+RECHECK_S = 300.0
+
+# device_id -> the live Device a held push is waiting on. One at a time, so
+# the hold is logged once rather than per check.
+held: dict = {}
+
+
+def push_wait(age_s: float, verdict: str | None) -> str | None:
+    """
+    Why a connect-time multi-MB push must wait, or None when it may start.
+
+    `verdict` is the Status tab's link grade (em_tcp.verdict). An unknown
+    grade is not a poor one: before the second stats report there is none,
+    and a controller without TCP_INFO never has one, so it must not hold
+    anything back on its own.
+    """
+    if age_s < SETTLE_S:
+        return f"the connection is {age_s:.0f}s old"
+    if verdict == "poor":
+        return "the link is graded poor"
+    return None
+
+
+def _link_verdict(live) -> str | None:
+    summary = live.tcp_minutes.summary(time.time())
+    return summary["verdict"] if summary else None
+
+
+async def _push_when_ready(device_id: str, live, connected_at: float,
+                           warned: bool) -> None:
+    """Re-run the reconcile once the held push may start, for as long as the
+    device stays on the connection it was held for."""
+    try:
+        while True:
+            age = time.monotonic() - connected_at
+            await asyncio.sleep(SETTLE_S - age if age < SETTLE_S else RECHECK_S)
+            if em_state.devices.get(device_id) is not live:
+                log.info(f"[api] [{device_id}] oww reconcile: the connection "
+                         f"a push was held for has gone; the next connect's "
+                         f"reconcile decides")
+                return
+            if push_wait(time.monotonic() - connected_at, _link_verdict(live)) is None:
+                break
+    finally:
+        if held.get(device_id) is live:
+            held.pop(device_id)
+    await reconcile(device_id, live, connected_at, warned=warned)
+
+
+async def reconcile(device_id: str, live, connected_at: float | None = None,
+                    *, warned: bool = False) -> None:
     """
     On connect: make sure the device has every asset it should, whatever its
     wake word mode (em_oww_assets.reconcile_action).
@@ -201,22 +275,33 @@ async def reconcile(device_id: str, live) -> None:
     a classifier it may never have received (#191), and a device on the
     controller's wake word used to be skipped entirely.
 
-    Three rules:
+    Four rules:
 
     - **Failure to LOOK is not evidence of absence.** Any error reading the
       device's inventory changes nothing, so a shell plane that is not up yet
       — likely, moments after connect — costs nothing.
+      A listing that did not finish counts as an error (device_state raises).
     - **Repair, never switch.** A device missing its selected model is left in
       its mode (it answers the button) and warned about; once the model is in,
       a config push rebuilds its scorer. It is never moved to the controller's
       wake word — see em_shadow.effective_mode.
     - **Quiet when there is nothing to do.** Devices on this fleet reconnect
       often, so the ordinary path is one shell round trip and no log line.
+    - **A multi-MB push waits for a link that can carry it** (push_wait): not
+      in a connection's first SETTLE_S, and not while it is graded poor. It is
+      held in a background task, logged once, and the reconcile runs again
+      when the wait ends, so the other connect-time payloads are not held up.
+
+    `connected_at` is when the device registered (monotonic); em_reconcile
+    passes it. `warned` is set by a re-run whose deaf warning already went
+    out when the push was held.
 
     Runs as a background task: it is a shell round trip and possibly a
     multi-megabyte push over a link measured at 5-7% packet loss, and nothing
     about the connect handshake should wait on it.
     """
+    if connected_at is None:
+        connected_at = time.monotonic()
     loop = asyncio.get_event_loop()
     effective = await loop.run_in_executor(
         None, db.get_effective_device_config, device_id
@@ -242,21 +327,39 @@ async def reconcile(device_id: str, live) -> None:
     if action == "none":
         return
 
+    need = sum(a.size for a in desired if a.name in gaps)
+    wait = None
+    if need >= PUSH_GATE_BYTES:
+        wait = push_wait(time.monotonic() - connected_at, _link_verdict(live))
+    if wait and held.get(device_id) is live:
+        return  # already held for this connection, and logged when it was
+
     # The mode is never changed here: a device missing its model keeps it,
     # answers the button, and hears its wake word again once this installs.
-    if action == "deaf":
+    if action == "deaf" and not warned:
         while_missing = ("this Echo cannot hear its wake word until it installs "
                          "(the button still works)")
         log.warning(f"[api] [{device_id}] oww reconcile: {missing} is not "
                     f"installed — {while_missing}")
         await em_events.push_log(device_id, "warn", "controller",
                               f"Wake word model {missing} is missing — {while_missing}")
-    else:
+    elif not wait:
         # Nothing is deaf, so no warning is owed — but anything missing is a
         # device that cannot switch mode, change wake word or gate on Silero
         # tomorrow. Repair quietly; see missing_assets.
         log.info(f"[api] [{device_id}] oww reconcile: {len(gaps)} asset(s) "
                  f"missing ({', '.join(gaps)}) — installing")
+
+    if wait:
+        log.info(f"[api] [{device_id}] oww reconcile: {len(gaps)} asset(s) "
+                 f"missing ({', '.join(gaps)}, {need / 1048576:.1f}MB); holding "
+                 f"the push because {wait}. It starts once the connection is "
+                 f"{SETTLE_S:.0f}s old and the link is not graded poor")
+        held[device_id] = live
+        em_tasks.spawn(_push_when_ready(device_id, live, connected_at,
+                                        warned or action == "deaf"),
+                       name=f"oww-push-held-{device_id}")
+        return
 
     try:
         result = await sync(live, device_id)
@@ -351,7 +454,12 @@ async def _sync_locked(live, device_id: str, progress=None) -> dict:
     if not desired:
         return {"ok": False, "error": "; ".join(problems) or "nothing to install"}
 
-    state = await device_state(live)
+    try:
+        state = await device_state(live)
+    except em_shell.ShellError as e:
+        # Never planned from: an unread device would be planned as an empty one.
+        await say("warn", f"could not read what is installed ({e}); nothing was sent")
+        return {"ok": False, "error": f"could not read the device ({e})"}
     plan = em_oww_assets.plan_sync(desired, state["installed"], state["free_mb"])
 
     if plan.blocked:

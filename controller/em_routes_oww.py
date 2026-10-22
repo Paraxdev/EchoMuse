@@ -19,6 +19,7 @@ import em_oww_assets
 import em_oww_check
 import em_oww_models
 import em_oww_sync
+import em_shell
 import em_state
 
 log = logging.getLogger("echomuse.api")
@@ -157,7 +158,14 @@ async def _get_oww_assets(request: web.Request) -> web.Response:
         payload.update({"status": "unknown", "installed": None, "free_mb": None})
         return em_http.ok(payload)
 
-    state = await em_oww_sync.device_state(live)
+    try:
+        state = await em_oww_sync.device_state(live)
+    except em_shell.ShellError as e:
+        # Unknown, as for an offline device: a listing that did not finish
+        # would otherwise read as "Not installed" with every file to send.
+        payload.update({"status": "unknown", "installed": None, "free_mb": None,
+                        "error": f"could not read the device ({e})"})
+        return em_http.ok(payload)
     plan = em_oww_assets.plan_sync(desired, state["installed"], state["free_mb"])
     payload.update({
         "installed": {k: v[0] for k, v in state["installed"].items()},
