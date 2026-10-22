@@ -172,7 +172,7 @@ def api(method, path, body):
         if not app.get("installed"):
             return 400, {"result": "error", "message": "App is not installed"}
         data = json.loads(body)
-        if set(data) - {"boot", "options", "ingress_panel", "watchdog"}:
+        if set(data) - {"boot", "options", "ingress_panel", "watchdog"} or set(data) & set(s.get("refuse_keys", [])):
             return 400, {"result": "error", "message": "extra keys not allowed"}
         if "boot" in data and data["boot"] not in ("auto", "manual"):
             return 400, {"result": "error", "message": "bad boot"}
@@ -192,6 +192,7 @@ JQ = {
         lambda d: [a["slug"] for a in (d["data"].get("addons") or [])]
                   + [a["slug"] for a in (d["data"].get("apps") or [])],
     '.data.options | tojson': lambda d: [json.dumps(d["data"]["options"])],
+    '{options: .data.options} | tojson': lambda d: [json.dumps({"options": d["data"]["options"]})],
     '.data.options | to_entries | sort_by(.key) | tojson':
         lambda d: [json.dumps([{"key": k, "value": v} for k, v in sorted(d["data"]["options"].items())])],
     '{options: .data.options} + (.data | with_entries(select((.key == "ingress_panel" or .key == "watchdog") and (.value | type) == "boolean"))) | tojson':

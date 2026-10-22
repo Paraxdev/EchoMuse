@@ -174,6 +174,18 @@ def test_migrate_copies_the_whole_data_folder_and_switches_the_apps(deployed):
     assert not (sim.work / "lock").exists(), "a finished run releases its lock"
 
 
+def test_the_options_are_copied_even_when_the_watchdog_setting_is_refused(deployed):
+    sim = deployed
+    sim.update(lambda st: st.update(refuse_keys=["watchdog"]))
+
+    p = pve(sim, "migrate")
+
+    fork = sim.app(ff.FORK)
+    assert fork["options"] == ff.UPSTREAM_OPTIONS
+    assert fork["state"] == "started"
+    assert "refused the sidebar or watchdog" in p.stderr
+
+
 def test_migrate_refuses_while_anything_has_the_upstream_data_mounted(deployed):
     sim = deployed
     before = upstream_tree(sim)

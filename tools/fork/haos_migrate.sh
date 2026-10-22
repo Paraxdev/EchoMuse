@@ -148,7 +148,10 @@ if [ "$copy" = 1 ]; then
     # watchdog the upstream app had would stay down after a crash.
     up_info=$(sv_call GET "/$UPSTREAM_SLUG/info") || die "cannot read $UPSTREAM_SLUG's options"
     body=$(printf '%s\n' "$up_info" | jqr '{options: .data.options} + (.data | with_entries(select((.key == "ingress_panel" or .key == "watchdog") and (.value | type) == "boolean"))) | tojson')
-    if sv_call POST "/$FORK_SLUG/options" "$body" >/dev/null; then
+    opts=$(printf '%s\n' "$up_info" | jqr '{options: .data.options} | tojson')
+    if sv_call POST "/$FORK_SLUG/options" "$body" >/dev/null \
+        || { warn "Supervisor refused the sidebar or watchdog setting; copying the options without them (set those in Settings > Apps)"
+            sv_call POST "/$FORK_SLUG/options" "$opts" >/dev/null; }; then
         a=$(printf '%s\n' "$up_info" | jqr '.data.options | to_entries | sort_by(.key) | tojson')
         b=$(app_field "$FORK_SLUG" 'options | to_entries | sort_by(.key) | tojson') || b=""
         if [ -n "$a" ] && [ "$a" = "$b" ]; then
