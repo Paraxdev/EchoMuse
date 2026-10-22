@@ -184,7 +184,18 @@ replace them:
   driver** — it scans but association never completes.
 - **DHCP on FireOS 6 is busybox `udhcpc`**, which needs a script to apply a
   lease it has already obtained; without one it gets an address and discards
-  it, which reads as a DHCP failure and is not.
+  it, which reads as a DHCP failure and is not. The script handles every
+  event udhcpc sends: `deconfig` clears the address (at start, and when a
+  lease runs out or is refused), `bound`/`renew` replace the default route
+  rather than adding a second, and `leasefail`/`nak` are logged. It used
+  to ignore `deconfig`, so a lapsed address stayed on `wlan0`.
+- **udhcpc checks the offered address with ARP (`-a`)** and declines it
+  when another host answers (RFC 2131 §3.1), so the router hands out a free
+  one instead of the Echo sharing an address and dropping every few minutes
+  (#871). Only our own busybox gets `-a`: `build-busybox.sh` refuses a build
+  without it, while a udhcpc borrowed from another busybox may not know the
+  option and would stop before asking for an address. FireOS 5's `dhcpcd`
+  keeps stock's `-A`, no check, with the rest of that path.
 - **emOS mounts the `/system` its image was BUILT beside**, named by
   `emos.system=/dev/block/mmcblk0pN` on its own cmdline and parsed by
   `cmdline_system_part()`. It used to hardcode p13, which is right only while
@@ -412,6 +423,61 @@ writes a skeleton (`ctrl_interface` + `update_config=1`) while `/data` is
 writable and before the flash. Recovering by hand needs only those two lines
 and a reboot.
 
+### When the link goes quiet: the link watchdog
+
+**An Echo can keep carrier and its address while nothing reaches it**, and
+nothing on the device used to notice: init reacted only to carrier going
+away or an address that never came. A FireOS 6 Echo stayed off the network
+that way for hours to days at a time without rebooting, ARP for it INCOMPLETE
+from the LAN,
+the long outages lining up with the router's automatic channel change
+(2026-10). hostap 2.10 here runs no `bgscan`, so nothing asked the supplicant
+to look again.
+
+Once the network has been up in a boot, init asks the default gateway every
+30 seconds whether it still hears the Echo: `busybox arping`, up to three
+requests in three seconds, stopping at the first reply. Off the network is
+any of: no ARP reply, carrier with no address, no carrier. After three
+minutes of that, init pushes, harder each time:
+
+| step | what | when |
+|---|---|---|
+| 1 | `wpa_cli reassociate` (rescans, so a BSS that changed channel is found) | 3 min |
+| 2 | `wpa_cli disconnect`, then `reconnect` | 3 min later |
+| 3 | supplicant restarted, `wlan0` bounced, fresh lease | 3 min later |
+| 4+ | step 3 again, the gap doubling: 3, 6, 12, 24, 48 min, then hourly | |
+
+Without carrier the loop already nudges `reassociate` every 15 seconds, so
+there it starts at step 3. Ten minutes of answers resets the ladder; one
+answer only restarts the three minutes. A probe that cannot be asked (no
+default route, no `arping` in the busybox in use) counts for nothing, so a
+network without a router, or an image whose busybox lacks the applet, gets
+exactly the old behaviour. The first unanswered probe, each step and the
+recovery are logged to `/run/net.log` as `link watchdog:` lines.
+
+`linkwd_step()` is the whole decision and `init/netcheck.c` drives it,
+alongside the gateway lookup, the `arping` exit codes, the udhcpc script
+(run by a real shell against a stub busybox) and the evidence copy below:
+
+```sh
+cd init && cc -O2 -o /tmp/netcheck netcheck.c && /tmp/netcheck
+```
+
+**The evidence survives the power cycle.** `/run/net.log` is tmpfs, and
+pulling the plug is how people recover an Echo that has gone quiet, so an
+outage nobody watched used to leave nothing. On a link loss and on each
+watchdog step, init copies the log's last 32KB to `/data/emos/net.last`
+behind a one-line summary (why, uptime, wall time if the controller has set
+the clock, carrier, address, gateway, how long off the network, watchdog
+steps, packet counters), keeping the copy before as `net.last.1`. At most two
+copies per incident (which ends when the gateway answers again, or cannot be
+asked) and never two within 30 minutes, so a link that fails all day costs
+about 1.5MB of writes and a working one nothing. The carrier a watchdog step
+drops itself counts as part of the outage it acts on. Read it with
+`cat /data/emos/net.last`; the controller also reports each new copy, with
+network names and addresses redacted, in the Echo's log when it next
+connects.
+
 ### The console banner
 
 A shell on `/dev/ttyGS0` opens with the device's name, serial, address, the
@@ -466,10 +532,13 @@ device that could not join its network wrote to flash every five seconds for
 ever, in exactly the failure state nobody is watching. The trade is that it
 does not survive a reboot, which is right: it answers "why is the network not
 up NOW", read over the console while the device is running, and a crash that
-spans a reboot is what the `last_kmsg` copies are for.
+spans a reboot is what the `last_kmsg` copies are for. The one exception is
+an outage, whose log tail goes to `net.last` (see the link watchdog above).
 
 The persistent writers are all bounded and all write on CHANGE rather than on a
 timer: `boot.state` once per boot, `last_kmsg.{prev,1,2}` rotated three deep,
+`net.last` and `net.last.1` on a link failure (two per incident at most, 30
+minutes apart),
 `console.pw` and `wpa_supplicant.conf` when they change, and `boot-good.img`
 only when the boot header's SHA1 image id differs from the stored one — a size
 check would never promote a new image, since every emOS build so far is the
@@ -686,6 +755,7 @@ never touches flash**:
 | live syslog + kernel log | `/run` tmpfs | none |
 | log at shutdown | `/data/emos/messages.last` | one bounded write |
 | previous boot's kernel log | `/data/emos/last_kmsg.prev`, `.1`, `.2` | one per boot |
+| network log around an outage | `/data/emos/net.last`, `.1` | 32KB, two per incident, 30 min apart |
 
 `last_kmsg` is **rotated three deep** on purpose: keeping one copy meant a
 device that reboot-loops overwrote the crash that started it with the boring

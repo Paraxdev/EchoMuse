@@ -202,6 +202,7 @@ COPY em_config_sections.py .
 COPY em_console_pw.py .
 COPY em_labels.py .
 COPY em_crashlog.py .
+COPY em_netlast.py .
 COPY em_emos_build.py .
 COPY em_emos_update.py .
 COPY em_recordings.py .

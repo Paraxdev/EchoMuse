@@ -760,6 +760,18 @@ jobs:
           sudo apt-get install -y -qq mksh >/dev/null
           mksh emos/device/em-wifi-check.sh
           sh emos/device/em-wifi-check.sh
+      # init now decides by itself when to tear a quiet link down, and owns
+      # what a DHCP lease does to wlan0. Both are silent when wrong: a watchdog
+      # that acts too often cuts a working Echo off every few minutes, one
+      # that never acts leaves it off the network for days, and a udhcpc
+      # script that ignores deconfig keeps an address the router has given to
+      # someone else (#871). The script is run by a real shell, under mksh as
+      # well (installed by the step above), since that is the device's
+      # /system/bin/sh.
+      - name: The link watchdog, the DHCP script and the outage evidence
+        run: |
+          cc -O2 -Wall -o /tmp/netcheck emos/init/netcheck.c
+          /tmp/netcheck
       # The C hashes a password by hand — init is a static binary with no
       # crypto library — and the controller hashes it in Python. Nothing but
       # equal output proves they agree, and the failure mode is a device
