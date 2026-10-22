@@ -1233,8 +1233,14 @@ function WakeSampleReview({ deviceId, isAdmin }) {
   </div>;
 }
 
-function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMisses, stateLabel, stateColor, isAdmin }) {
+function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMisses, day, stateLabel, stateColor, isAdmin }) {
   const [hover, setHover] = useState(null); // index into `recent`
+  // A tapped turn keeps its detail open: a touch screen has no hover, so
+  // the detail was mouse-only. Held by turn rather than by row, since the
+  // list refreshes every 10s and a new turn shifts every index down one.
+  const [pinned, setPinned] = useState(null);
+  const turnKey = t => t.turn_id ?? t.ts;
+  const togglePin = t => setPinned(p => p === turnKey(t) ? null : turnKey(t));
   const mono = "var(--font-mono)";
 
   // Saved utterances — play in place or download the WAV. Both go through
@@ -1313,6 +1319,8 @@ function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMis
   // rest of the tab) out of view.
   const recent = turns.slice().reverse();
   const scale = Math.max(3000, ...recent.map(t => turnSegments(t).shown));
+  const pinnedAt = pinned == null ? -1 : recent.findIndex(t => turnKey(t) === pinned);
+  const shown = hover != null ? hover : pinnedAt >= 0 ? pinnedAt : null;
 
   return (
     <div>
@@ -1325,6 +1333,13 @@ function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMis
         <Lcd label="Median reply" value={medianReply != null ? fmtS(medianReply) : '—'} color="var(--lcd-dim)" size={16}/>
         <Lcd label="Near-misses" value={nearMisses != null ? nearMisses : '—'}
              color={nearMisses > 0 ? 'var(--lcd-amber)' : 'var(--lcd-dim)'} size={16}/>
+        {/* From the turns table, so it survives a reconnect, which resets
+            Near-misses above; amber once nothing-heard outnumbers answered. */}
+        <div title="Turns in the last 24 hours that opened and heard nothing said. After a wake word that is usually a false wake.">
+          <Lcd label="Heard nothing · 24 h"
+               value={!day ? '—' : day.turns ? `${day.heardNothing}/${day.turns}` : '0'}
+               color={day && day.heardNothing > day.ok ? 'var(--lcd-amber)' : 'var(--lcd-dim)'} size={16}/>
+        </div>
         <Lcd label="Underruns" value={turns.reduce((s, t) => s + (t.underruns || 0), 0)}
              color={turns.some(t => t.underruns > 0) ? 'var(--lcd-amber)' : 'var(--lcd-dim)'} size={16}/>
       </div>
@@ -1356,11 +1371,20 @@ function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMis
             const seg = turnSegments(t);
             const time = new Date(t.ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
             const failed = t.outcome !== 'ok';
+            // Hover follows mouse pointers only: a tap fires pointerenter
+            // too, which would open the detail the same tap's click closed.
             return (
               <div key={i}
-                onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)}
-                style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-5)', padding: 'var(--space-2) 0', cursor: 'default', background: hover === i ? 'var(--hairline)' : 'transparent', borderRadius: 'var(--radius-sm)' }}>
-                <span style={{ fontFamily: mono, fontSize: 'var(--fs-xs)', color: 'var(--muted)', minWidth: '8ch', flexShrink: 0, textAlign: 'right', whiteSpace: 'nowrap' }}>{time}</span>
+                onClick={e => { if (!e.target.closest('button')) togglePin(t); }}
+                onPointerEnter={e => { if (e.pointerType === 'mouse') setHover(i); }}
+                onPointerLeave={e => { if (e.pointerType === 'mouse') setHover(null); }}
+                style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-5)', padding: 'var(--space-2) 0', cursor: 'pointer', background: shown === i ? 'var(--hairline)' : 'transparent', borderRadius: 'var(--radius-sm)' }}>
+                {/* The keyboard's way in, as its own button: the row holds the
+                    play and download buttons, and a row that was a button
+                    itself would nest them. */}
+                <button type="button" onClick={() => togglePin(t)} aria-expanded={shown === i}
+                  title="Show this turn's detail"
+                  style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontFamily: mono, fontSize: 'var(--fs-xs)', color: 'var(--muted)', minWidth: '8ch', flexShrink: 0, textAlign: 'right', whiteSpace: 'nowrap' }}>{time}</button>
                 <div style={{ flex: 1, display: 'flex', height: 14, alignItems: 'stretch' }}>
                   {TURN_STAGES.map(s => seg[s.key] > 0 && (
                     <div key={s.key} style={{
@@ -1371,7 +1395,7 @@ function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMis
                 </div>
                 <span style={{ fontFamily: mono, fontSize: 'var(--fs-xs)', color: 'var(--text2)', width: '6ch', flexShrink: 0 }}>{fmtS(seg.shown)}</span>
                 <span style={{ fontFamily: mono, fontSize: 'var(--fs-2xs)', textTransform: 'uppercase', letterSpacing: 'var(--tracking-label)', width: '20ch', whiteSpace: 'nowrap', flexShrink: 0, color: failed ? 'var(--warn)' : 'var(--ok)' }}>
-                  {t.outcome === 'ok' ? 'ok' : (t.outcome || '?').replace(/_/g, ' ')}
+                  {_outcomeLabel(t.outcome)}
                 </span>
                 {/* Saved utterance: listen in place, or download the WAV.
                     The slot is reserved even when a turn has no recording so
@@ -1392,14 +1416,14 @@ function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMis
           })}
           </div>
 
-          {/* Hover detail */}
-          {hover != null && recent[hover] && (() => {
-            const t = recent[hover]; const seg = turnSegments(t);
+          {/* Detail: the hovered turn, else the tapped one */}
+          {shown != null && recent[shown] && (() => {
+            const t = recent[shown]; const seg = turnSegments(t);
             return (
               <div style={{ marginTop: 'var(--space-5)', background: 'var(--hairline)', border: '1px solid var(--track)', borderRadius: 'var(--radius-md)', padding: 'var(--space-4) var(--space-6)', fontFamily: mono, fontSize: 'var(--fs-sm)', color: 'var(--text2)', lineHeight: 1.7 }}>
                 <span style={{ color: 'var(--muted)' }}>{t.trigger}</span>
                 {' · '}listening {fmtS(seg.listen)} · transcribe {fmtS(seg.transcribe)} · respond {fmtS(seg.respond)} · total {fmtS(Math.max(t.total_ms, 0))}
-                {t.wake_model ? <><br/>wake {t.wake_model.replace(/\.[a-z]+$/, '').split('/').pop()} score {t.wake_score?.toFixed(3)} (thr {t.wake_threshold?.toFixed(2)}) · noise floor {t.noise_floor?.toFixed(4)}</> : null}
+                {t.wake_model ? <><br/>wake {t.wake_model.replace(/\.[a-z]+$/, '').split('/').pop()} score {t.wake_score?.toFixed(3)} (thr {_thresholdText(t.wake_threshold)}) · noise floor {t.noise_floor?.toFixed(4)}</> : null}
                 {t.underruns != null ? <>{t.wake_model ? ' · ' : <br/>}underruns <span style={{ color: t.underruns > 0 ? 'var(--warn)' : 'inherit' }}>{t.underruns}</span></> : null}
                 {t.stt_text ? <><br/>“{t.stt_text.length > 90 ? t.stt_text.slice(0, 90) + '…' : t.stt_text}”</> : null}
               </div>
@@ -2719,13 +2743,15 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
             const wwLabel = wwModelLabel(cfgEff.owwModel);
             return (
               <div style={{ minHeight:'100%', display:'flex', flexDirection:'column' }}>
-                <Panel label={`Voice activity — ${wwLabel} @ ${cfgEff.owwThreshold != null ? cfgEff.owwThreshold.toFixed(2) : '—'}`} style={{ flex:1 }}>
+                {/* The threshold as stored: toFixed(2) showed 0.175 as 0.17. */}
+                <Panel label={`Voice activity · ${wwLabel} @ ${_thresholdText(cfgEff.owwThreshold)}`} style={{ flex:1 }}>
                   <TurnObservability
                     turns={turns}
                     deviceId={device.device_id}
                     deviceLabel={device.label}
                     recordingsOn={cfgEff.saveUtterances}
                     nearMisses={device.owwNearMisses}
+                    day={_activityTotals(activity24)}
                     stateLabel={state.label.toUpperCase()}
                     stateColor={state.lcd}
                     isAdmin={isAdmin}
