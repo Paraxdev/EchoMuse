@@ -181,7 +181,12 @@ replace them:
   patched to defer to `<linux/netlink.h>`), hostap's `priv_netlink.h` needs
   the same and its system includes must precede its `#ifndef IFLA_*`
   fallbacks, bionic ships no `librt`, and **WEXT is not an option on this
-  driver** — it scans but association never completes.
+  driver** — it scans but association never completes. The script also
+  patches hostap to retry the pairwise key install, 3 more tries 150 ms
+  apart: the MT8163 driver refuses a valid PTK while its firmware is not
+  ready, and hostap's one try then reports the handshake as a wrong
+  passphrase (seen with one mesh router, 2026-10). A retry logs
+  `WPA: PTK install retry N/3`.
 - **DHCP on FireOS 6 is busybox `udhcpc`**, which needs a script to apply a
   lease it has already obtained; without one it gets an address and discards
   it, which reads as a DHCP failure and is not. The script handles every
