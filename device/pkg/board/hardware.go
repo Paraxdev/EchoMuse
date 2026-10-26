@@ -24,6 +24,11 @@ type Hardware struct {
 	Keys []Input
 	// LEDRing is the ring driver's i2c client, by its sysfs `name`.
 	LEDRing I2C
+	// RingLED0 is where the ring's LED 0 sits, in degrees clockwise from
+	// 12 o'clock in the same frame as the microphones' angles; the other
+	// eleven follow clockwise 30 degrees apart. It points the ring at a
+	// talker.
+	RingLED0 float64
 	// MuteLEDGPIO is the sysfs GPIO number of the LED under the mute button,
 	// "" when the board has none we may drive. The same number is a
 	// different SoC pin on a board with another gpiochip base, so this is
@@ -245,16 +250,16 @@ var tlvMicMutes = []string{
 	"ADC_D Left Mute", "ADC_D Right Mute",
 }
 
-// donutMics: one microphone per corner of the top and none in the centre,
-// ch1, ch2, ch3, ch0 clockwise from the action button (tap test on 41C8,
-// 2026-10-24). The angles assume the button is at 12 o'clock midway between
-// two corners, as biscuit's 0 degrees is; confirmed against the ring is owed.
-// No loopback in the frame: the Dot 3's is its own PCM (Loopback).
+// donutMics: one microphone beside each of the four buttons and none in the
+// centre. With the volume-up button at 12 o'clock: ch0 by volume up, ch1 by
+// the action button at 3, ch2 by volume down at 6, ch3 by mute at 9 (taps on
+// each hole of 41C8, 2026-10-25; each landed on one channel 10-25dB above the
+// rest). No loopback in the frame: the Dot 3's is its own PCM (Loopback).
 var donutMics = MicArray{
 	Channels: 4,
 	Format:   S32LE,
 	Perimeter: []Mic{
-		{Ch: 1, Angle: 45}, {Ch: 2, Angle: 135}, {Ch: 3, Angle: 225}, {Ch: 0, Angle: 315},
+		{Ch: 1, Angle: 90}, {Ch: 2, Angle: 180}, {Ch: 3, Angle: 270}, {Ch: 0, Angle: 0},
 	},
 	Centre:  -1,
 	EchoRef: -1,
@@ -268,6 +273,7 @@ var biscuitHardware = &Hardware{
 		{Name: "keys", Fallback: "/dev/input/event2"},    // volume
 	},
 	LEDRing:     I2C{Driver: "is31fl3236", Fallback: "/sys/devices/soc/11007000.i2c/i2c-0/0-003f"},
+	RingLED0:    240,
 	MuteLEDGPIO: "444",
 	Capture:     PCM{Name: "TLV320AIC3101 Capture", Fallback: &PCMAddr{0, 24}},
 	Playback:    PCM{Name: "TLV320AIC3204 Playback", Fallback: &PCMAddr{0, 23}},
@@ -300,6 +306,7 @@ var biscuitHardware = &Hardware{
 var radarHardware = &Hardware{
 	Keys:       []Input{{Name: "mtk-kpd"}, {Name: "keys"}},
 	LEDRing:    I2C{Driver: "is31fl3236"},
+	RingLED0:   240,
 	Capture:    PCM{Name: "TLV320AIC3101 Capture"},
 	Playback:   PCM{Name: "TLV320AIC3204 Playback"},
 	Mics:       biscuitMics,
@@ -339,6 +346,9 @@ var donutHardware = &Hardware{
 	// driver delivers the mute button.
 	Keys:    []Input{{Name: "gpio-keys"}, {Name: "gpio-privacy"}},
 	LEDRing: I2C{Driver: "is31fl3236"},
+	// LED 0 is the first clockwise past 6 o'clock: the LEDs straddle each
+	// hour rather than sitting on it (lit one by one on 41C8, 2026-10-25).
+	RingLED0: 195,
 	// The mute LED is the privacy driver's (gpio 494), lit without us, and
 	// gpio444 here is SoC pin 57 in its audio function: exporting it kills
 	// the amplifier until reboot (@shortgame11's port). So none is stated.
@@ -388,6 +398,8 @@ type Layout struct {
 	// order; a device not found is left out and reported.
 	Keys    []string
 	LEDRing string // sysfs directory, "" when not found
+	// RingLED0 is the board's; see Hardware.
+	RingLED0 float64
 	// MuteLEDGPIO is "" when the board has no mute LED GPIO to drive.
 	MuteLEDGPIO string
 	Capture     *PCMAddr // nil when not found
@@ -470,6 +482,7 @@ func Resolve(root string, b *Board) *Layout {
 	}
 	note("led ring", hw.LEDRing.Driver, dir, err)
 	l.LEDRing = dir
+	l.RingLED0 = hw.RingLED0
 	l.Capture = pcm("capture", hw.Capture, true)
 	l.Mics = hw.Mics
 	l.MicMutes = hw.MicMutes
