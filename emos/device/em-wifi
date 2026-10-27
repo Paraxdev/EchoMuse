@@ -317,6 +317,11 @@ mkdir -p /data/emos
 {
     printf 'ctrl_interface=%s\n' "$CTRL"
     printf 'update_config=1\n'
+    # Amazon's supplicant on FireOS 5 may predate this field and would refuse
+    # the whole conf; the retire step below covers it at runtime instead.
+    if [ "$SUP" = /sbin/wpa_supplicant ]; then
+        printf 'wowlan_disconnect_on_deinit=1\n'
+    fi
     printf 'network={\n'
     printf '        ssid=%s\n' "$ssid_hex"
     [ -n "$psk_line" ] && printf '        %s\n' "$psk_line"
@@ -348,6 +353,13 @@ echo "Wrote $CONF."
 
 # init supervises the supplicant and restarts it against whatever conf is
 # there, so all this does is retire the old process and watch for an address.
+#
+# The MT8163 driver reports WoWLAN as enabled, so unless the supplicant is told
+# otherwise hostap's exit skips the deauth and leaves the old link and its PTK
+# in the firmware, and the next supplicant's PTK is refused for minutes. The
+# conf above carries the setting; this covers a supplicant started from an
+# older conf, and one that does not know the field answers FAIL.
+"$CLI" -p "$CTRL" -iwlan0 set wowlan_disconnect_on_deinit 1 >/dev/null 2>&1
 killall wpa_supplicant 2>/dev/null
 echo "Connecting..."
 i=0

@@ -374,6 +374,9 @@ func composeConf(ssid []byte, psk string) string {
 		"ctrl_interface=" + sockDir(),
 		"update_config=1",
 	}
+	if onEmOS() && ownSupplicant() {
+		lines = append(lines, "wowlan_disconnect_on_deinit=1")
+	}
 	if !onEmOS() {
 		lines = append(lines,
 			"driver_param=use_p2p_group_interface=1",
@@ -512,6 +515,26 @@ func enableWifi() error {
 	return nil
 }
 
+// ownSupplicant reports whether emOS's own hostap 2.10 supplicant is the one
+// init starts, rather than Amazon's (FireOS 5 images carry none of ours).
+func ownSupplicant() bool {
+	_, err := os.Stat(emosSuppP)
+	return err == nil
+}
+
+// leaveOnDeinit makes the running supplicant deauthenticate and clear its keys
+// when SIGTERM ends it. The MT8163 driver reports WoWLAN as enabled, so hostap
+// otherwise skips both at deinit and leaves the old link and its PTK in the
+// firmware: the next supplicant then has its PTK refused ("Failed to set PTK
+// to the driver") and its authentications time out for minutes, whichever
+// network it joins. composeConf writes the same setting into the conf; this
+// covers a supplicant started from a conf written before it did, and answers
+// FAIL harmlessly on a supplicant that predates the field.
+func leaveOnDeinit() {
+	out, err := wpaCli("set", "wowlan_disconnect_on_deinit", "1")
+	log.Printf("[wifi] wowlan_disconnect_on_deinit -> %s (err %v)", strings.TrimSpace(out), err)
+}
+
 // retireSupplicant ends the running supplicant so emOS's init restarts it
 // against the new conf; that supervision loop is a 5s ticker (net_main in
 // emos/init/init.c).
@@ -566,6 +589,7 @@ func reloadConf(content string) error {
 		if err := writeConf(content); err != nil {
 			return err
 		}
+		leaveOnDeinit()
 		return retireSupplicant()
 	}
 	if err := disableWifi(); err != nil {

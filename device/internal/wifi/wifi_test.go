@@ -222,6 +222,45 @@ func TestComposeConfOpenNetwork(t *testing.T) {
 	}
 }
 
+// The MT8163 driver reports WoWLAN as enabled, so hostap 2.10 ends without a
+// deauth unless wowlan_disconnect_on_deinit is set, and the stale link it
+// leaves refuses the next supplicant's PTK for minutes. Our supplicant gets
+// the field; Amazon's, which may predate it, never does.
+func TestEmosConfLeavesOnDeinitOnlyForOurSupplicant(t *testing.T) {
+	const line = "\nwowlan_disconnect_on_deinit=1\n"
+	for _, tc := range []struct {
+		name    string
+		base    string
+		ownSupp bool
+		want    bool
+	}{
+		{"emOS with its own supplicant", platform.EmOS, true, true},
+		{"emOS on a FireOS 5 image, Amazon's supplicant", platform.EmOS, false, false},
+		{"FireOS", platform.FireOS, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			onBase(t, tc.base, "ctrl_interface="+androidDir+"\n", "ctrl_interface="+emosDir+"\n")
+			supp := filepath.Join(t.TempDir(), "wpa_supplicant")
+			if tc.ownSupp {
+				if err := os.WriteFile(supp, []byte("#!/bin/sh\n"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			old := emosSuppP
+			t.Cleanup(func() { emosSuppP = old })
+			emosSuppP = supp
+
+			conf := composeConf([]byte("net"), "12345678")
+			if got := strings.Contains(conf, line); got != tc.want {
+				t.Errorf("wowlan_disconnect_on_deinit present=%v, want %v:\n%s", got, tc.want, conf)
+			}
+			if tc.want && strings.Index(conf, line) > strings.Index(conf, "network={") {
+				t.Errorf("the field is global and must come before the network block:\n%s", conf)
+			}
+		})
+	}
+}
+
 // The conf we write on emOS has to be readable by whichever supplicant init
 // will start, and the two run as different users. Writing it root-only on a
 // FireOS 5 image left Amazon's supplicant unable to open it: it exited at
